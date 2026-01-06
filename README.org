@@ -1,0 +1,15 @@
+** Setup
+This project requires c++23.  We need to install the external dependecnies to build this.
+*** Glad
+I am using glad to do this: https://gen.glad.sh/ I am using the options of c/c++ opengl core 4.6
+I am inluding all the extensions. And enabling debug but nothing else...
+I then moved the thing that was created into the external / glad folder
+
+*** GLM
+There is of course the fetch content route for installing glm on cmake. However, I want to keep the project structure consistent so I'm going to put it into an external.
+
+This was pretty simple just copied a folder over
+
+*** GLFW
+Fond this stackoverflow post which seems to be everything that I've been needing for a long while lol.
+https://stackoverflow.com/questions/17768008/how-to-build-install-glfw-3-and-use-it-in-a-linux-project
