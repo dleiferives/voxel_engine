@@ -5,7 +5,7 @@ in vec3 Normal;
 in vec3 Color;
 in vec2 TexCoord;
 in float TextureLayer;
-in float AO;
+in float AO;  // Now contains baked light level (0.0 - 1.0)
 
 out vec4 FragColor;
 
@@ -13,9 +13,6 @@ uniform vec3 viewPos;
 uniform sampler2DArray textureArray;
 
 void main() {
-    vec3 lightDir = normalize(vec3(0.5, 1.0, 0.3));
-    vec3 norm = normalize(Normal);
-
     vec4 texColor;
     if (TextureLayer < 0.0) {
         // Micro blocks use vertex color only
@@ -32,9 +29,9 @@ void main() {
         discard;
     }
 
-    float ambient = 0.3;
-    float diff = max(dot(norm, lightDir), 0.0);
-    vec3 result = texColor.rgb * (ambient + diff * 0.7) * AO;
+    // Apply baked light level (AO now contains propagated light)
+    // The light level already includes directional shading from meshing
+    vec3 result = texColor.rgb * AO;
 
     // Fog
     float dist = length(FragPos - viewPos);
