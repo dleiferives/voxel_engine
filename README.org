@@ -1,3 +1,15 @@
+** Chunk Structuring
+We need to setup the chunks so that they are optimized within singular blocks, This will allow for better utilization of the hardware. However this will cause there to be more issues with the "distant horizons" style of LOD.
+
+In this regard the Minecraft methodology is highly effective as it allows us to deal only with the two dimensions. However, this does have a large amount of extra memory. In some regard we could use bounded octrees for relaying where the information is stored inside of the chunking system so it is  more efficent. However this really does throw a spanner in the rendering optimization. There should be some amount of bounding the height that can be built to.
+
+Perhaps we could acheive this by using in game rules so that it is immersive. Such as gravity or something of that regard. Where taller things are more unstable and therefore we have to have a stronger base to build from.
+
+In this same regard we can handle depths. Where we can have molten or various stages of liquidity inside of the world generation. Where you have to cool the earth to make stable or habitable structures.
+
+This would of course lead to further issues. However the idea of constraining the build space by using game rules would be effective.
+
+
 ** Setup
 This project requires c++23.  We need to install the external dependecnies to build this.
 *** Glad
@@ -13,3 +25,6 @@ This was pretty simple just copied a folder over
 *** GLFW
 Fond this stackoverflow post which seems to be everything that I've been needing for a long while lol.
 https://stackoverflow.com/questions/17768008/how-to-build-install-glfw-3-and-use-it-in-a-linux-project
+
+
+g
