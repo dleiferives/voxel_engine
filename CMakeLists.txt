@@ -20,18 +20,35 @@ add_subdirectory(external/glad)
 # Just add it as a raw include as we don't need to compile it lolol
 # add_subdirectory(external/glm)
 
+
+#Setup imgui
+file(GLOB IMGUI_SOURCES
+    external/imgui/imgui/*.cpp
+    external/imgui/imgui/backends/imgui_impl_glfw.cpp
+    external/imgui/imgui/backends/imgui_impl_opengl3.cpp
+)
+
+add_library(imgui ${IMGUI_SOURCES})
+target_include_directories(imgui PUBLIC external/imgui/imgui external/imgui/imgui/backends)
+target_compile_definitions(imgui PUBLIC IMGUI_IMPL_OPENGL_LOADER_GLAD)
+target_link_libraries(imgui glfw)
+
+
 add_executable(voxel
     src/main.cpp
 )
 
 target_include_directories(voxel PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/external/glm_tmp
+    ${CMAKE_CURRENT_SOURCE_DIR}/external/imgui
 )
 
 target_link_libraries(voxel PRIVATE
     glfw
     glad
+    imgui
 )
+
 
 # On some platforms you may need extra system libs
 if (WIN32)

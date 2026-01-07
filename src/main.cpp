@@ -8,6 +8,10 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
+#include <imgui/imgui.h>
+#include <imgui/backends/imgui_impl_glfw.h>
+#include <imgui/backends/imgui_impl_opengl3.h>
+
 
 const char vertexShaderSource[] = {
 #embed "shaders/cube.vert"
@@ -197,9 +201,9 @@ int main()
     // Setup our offset buffers thing
     std::vector<glm::vec3> cube_positions;
     float offset = 2.0f;
-    for (int y = -10; y < 10; y += 2) {
+    for (int y = -40; y < 40; y += 2) {
         for (int x = -10; x < 10; x += 2) {
-            for (int z = -10; z < 10; z += 2) {
+            for (int z = -40; z < 40; z += 2) {
                 cube_positions.push_back(glm::vec3(x, y, z));
             }
         }
@@ -255,12 +259,33 @@ int main()
     glVertexAttribDivisor(1, 1);
 
 
+    // Setup IMGUI
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO(); (void)io;
+    ImGui::StyleColorsDark();
+    ImGui_ImplGlfw_InitForOpenGL(window, true);
+    ImGui_ImplOpenGL3_Init("#version 460");
+
+
     while (!glfwWindowShouldClose(window)) {
         float currentFrame = static_cast<float>(glfwGetTime());
         g_manager.delta_time = currentFrame - g_manager.last_frame;
         g_manager.last_frame = currentFrame;
 
         processInput(window);
+
+        // IMGUI
+        ImGui_ImplOpenGL3_NewFrame();
+        ImGui_ImplGlfw_NewFrame();
+        ImGui::NewFrame();
+
+        // Create a simple debug window
+        ImGui::Begin("Debug Menu");
+        ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / io.Framerate, io.Framerate);
+        ImGui::Text("Camera Pos: %.2f, %.2f, %.2f", g_manager.camera.pos.x, g_manager.camera.pos.y, g_manager.camera.pos.z);
+        ImGui::SliderFloat("Camera Speed", &g_manager.camera.speed, 0.5f, 10.0f);
+        ImGui::End();
 
         glClearColor(0.1f, 0.1f, 0.2f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -280,9 +305,16 @@ int main()
         glBindVertexArray(VAO);
         glDrawArraysInstanced(GL_TRIANGLES, 0, 36, (GLsizei)cube_positions.size());
 
+        ImGui::Render();
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
         glfwSwapBuffers(window);
         glfwPollEvents();
     }
+
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+    ImGui::DestroyContext();
 
     glDeleteVertexArrays(1, &VAO);
     glDeleteBuffers(1, &VBO);
