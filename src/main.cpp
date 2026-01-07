@@ -232,6 +232,7 @@ int main()
     }
 
     glEnable(GL_DEPTH_TEST);
+    glEnable(GL_CULL_FACE);
 
     // Setup our offset buffers thing
     std::vector<glm::vec3> cube_positions;
