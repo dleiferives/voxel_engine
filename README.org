@@ -1,3 +1,14 @@
+** Speedup
+
+So right now I am rendering 1M cubes at around 16fps.
+This is not good enough.
+*** Face culling
+This had little to no impact on performance...
+I'm going to remove it for now but if performance is an issue later then we can think about it again.
+*** Use an index buffer
+Just reduces the number of indicies that need to be send to the gpu.
+https://www.youtube.com/watch?v=o6oRc1QOifI&disable_polymer=true
+
 ** Chunk Structuring
 We need to setup the chunks so that they are optimized within singular blocks, This will allow for better utilization of the hardware. However this will cause there to be more issues with the "distant horizons" style of LOD.
 

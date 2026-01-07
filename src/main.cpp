@@ -68,52 +68,33 @@ Manager g_manager = {
     },
 };
 
-
-float g_cube[] = {
-    -0.5f, -0.5f, -0.5f,
-    0.5f, -0.5f, -0.5f,
-    0.5f,  0.5f, -0.5f,
-    0.5f,  0.5f, -0.5f,
-    -0.5f,  0.5f, -0.5f,
-    -0.5f, -0.5f, -0.5f,
-
-    -0.5f, -0.5f,  0.5f,
-    0.5f, -0.5f,  0.5f,
-    0.5f,  0.5f,  0.5f,
-    0.5f,  0.5f,  0.5f,
-    -0.5f,  0.5f,  0.5f,
-    -0.5f, -0.5f,  0.5f,
-
-    -0.5f,  0.5f,  0.5f,
-    -0.5f,  0.5f, -0.5f,
-    -0.5f, -0.5f, -0.5f,
-    -0.5f, -0.5f, -0.5f,
-    -0.5f, -0.5f,  0.5f,
-    -0.5f,  0.5f,  0.5f,
-
-    0.5f,  0.5f,  0.5f,
-    0.5f,  0.5f, -0.5f,
-    0.5f, -0.5f, -0.5f,
-    0.5f, -0.5f, -0.5f,
-    0.5f, -0.5f,  0.5f,
-    0.5f,  0.5f,  0.5f,
-
-    -0.5f, -0.5f, -0.5f,
-    0.5f, -0.5f, -0.5f,
-    0.5f, -0.5f,  0.5f,
-    0.5f, -0.5f,  0.5f,
-    -0.5f, -0.5f,  0.5f,
-    -0.5f, -0.5f, -0.5f,
-
-    -0.5f,  0.5f, -0.5f,
-    0.5f,  0.5f, -0.5f,
-    0.5f,  0.5f,  0.5f,
-    0.5f,  0.5f,  0.5f,
-    -0.5f,  0.5f,  0.5f,
-    -0.5f,  0.5f, -0.5f,
+// Unique vertices for a cube (8 total)
+float g_cube_vertices[] = {
+    -0.5f, -0.5f,  0.5f, // 0
+     0.5f, -0.5f,  0.5f, // 1
+     0.5f,  0.5f,  0.5f, // 2
+    -0.5f,  0.5f,  0.5f, // 3
+    -0.5f, -0.5f, -0.5f, // 4
+     0.5f, -0.5f, -0.5f, // 5
+     0.5f,  0.5f, -0.5f, // 6
+    -0.5f,  0.5f, -0.5f  // 7
 };
 
-
+// Indices defining the 12 triangles of the cube
+unsigned int g_cube_indices[] = {
+    // Front face
+    0, 1, 2, 2, 3, 0,
+    // Right face
+    1, 5, 6, 6, 2, 1,
+    // Back face
+    5, 4, 7, 7, 6, 5,
+    // Left face
+    4, 0, 3, 3, 7, 4,
+    // Bottom face
+    4, 5, 1, 1, 0, 4,
+    // Top face
+    3, 2, 6, 6, 7, 3
+};
 
 
 void framebuffer_size_callback(GLFWwindow* window, int width, int height)
@@ -265,22 +246,28 @@ int main()
 
     // Setup buffers
     //
-    unsigned int VBO, VAO, cubesVBO;
+    unsigned int VBO, VAO, EBO, cubesVBO;
     glGenVertexArrays(1, &VAO);
     glGenBuffers(1, &VBO);
+    glGenBuffers(1, &EBO);
     glGenBuffers(1, &cubesVBO);
 
     // cube
     glBindVertexArray(VAO);
+
+    // Vertex Buffer
     glBindBuffer(GL_ARRAY_BUFFER, VBO);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(g_cube), g_cube, GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(g_cube_vertices), g_cube_vertices, GL_STATIC_DRAW);
+
+    // Index Buffer
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(g_cube_indices), g_cube_indices, GL_STATIC_DRAW);
 
     // Position attribute
-    // Stride could be 3 * sizeof(float). But since we're tightly packing I will just do that explicitly
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, (void*)0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
     glEnableVertexAttribArray(0);
 
-    // cubes positions
+    // cubes positions (Instanced data)
     glBindBuffer(GL_ARRAY_BUFFER, cubesVBO);
     glBufferData(
         GL_ARRAY_BUFFER,
@@ -350,14 +337,13 @@ int main()
         glm::mat4 projection = glm::perspective(glm::radians(45.0f), (float)SCR_WIDTH / (float)SCR_HEIGHT, 0.1f, g_manager.camera.render_distance);
         glm::mat4 view = glm::lookAt(g_manager.camera.pos, g_manager.camera.pos + g_manager.camera.front, g_manager.camera.up);
         glm::mat4 model = glm::mat4(1.0f);
-        // model = glm::rotate(model, (float)glfwGetTime(), glm::vec3(0.5f, 1.0f, 0.0f));
 
         glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
         glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "view"), 1, GL_FALSE, glm::value_ptr(view));
         glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
 
         glBindVertexArray(VAO);
-        glDrawArraysInstanced(GL_TRIANGLES, 0, 36, (GLsizei)cube_positions.size());
+        glDrawElementsInstanced(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0, (GLsizei)cube_positions.size());
 
         ImGui::Render();
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
@@ -372,6 +358,7 @@ int main()
 
     glDeleteVertexArrays(1, &VAO);
     glDeleteBuffers(1, &VBO);
+    glDeleteBuffers(1, &EBO);
     glDeleteBuffers(1, &cubesVBO);
     glDeleteProgram(shaderProgram);
 
