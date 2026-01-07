@@ -9,28 +9,14 @@
 #include <glm/gtc/type_ptr.hpp>
 
 
-const char* vertexShaderSource = R"glsl(
-#version 460 core
-layout (location = 0) in vec3 aPos;
-layout (location = 1) in vec3 aOffset;
-out vec3 ourColor;
-uniform mat4 model;
-uniform mat4 view;
-uniform mat4 projection;
-void main() {
-    gl_Position = projection * view * model * vec4(aPos + aOffset, 1.0);
-    ourColor = aPos + vec3(0.5);
-}
-)glsl";
-
-const char* fragmentShaderSource = R"glsl(
-#version 460 core
-out vec4 FragColor;
-in vec3 ourColor;
-void main() {
-    FragColor = vec4(ourColor, 1.0);
-}
-)glsl";
+const char vertexShaderSource[] = {
+#embed "shaders/cube.vert"
+    ,0
+};
+const char fragmentShaderSource[] = {
+#embed "shaders/cube.frag"
+    ,0
+};
 
 
 // Camera
@@ -221,11 +207,13 @@ int main()
 
     // Compile Shaders
     unsigned int vertexShader = glCreateShader(GL_VERTEX_SHADER);
-    glShaderSource(vertexShader, 1, &vertexShaderSource, NULL);
+    const char *vptr = vertexShaderSource;
+    glShaderSource(vertexShader, 1, &vptr, NULL);
     glCompileShader(vertexShader);
 
     unsigned int fragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
-    glShaderSource(fragmentShader, 1, &fragmentShaderSource, NULL);
+    const char *fptr = fragmentShaderSource;
+    glShaderSource(fragmentShader, 1, &fptr, NULL);
     glCompileShader(fragmentShader);
 
     unsigned int shaderProgram = glCreateProgram();
