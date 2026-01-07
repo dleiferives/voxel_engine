@@ -12,9 +12,12 @@ void main() {
     vec3 lightDir = normalize(vec3(0.5, 1.0, 0.3));
     vec3 norm = normalize(Normal);
 
-    float ambient = 0.3;
+    float ambient = 0.4;
     float diff = max(dot(norm, lightDir), 0.0);
-    vec3 result = Color * (ambient + diff * 0.7);
+    vec3 result = Color * (ambient + diff * 0.6);
+
+    // Slight emissive for crystals/special blocks
+    result += Color * 0.1;
 
     // Fog
     float dist = length(FragPos - viewPos);

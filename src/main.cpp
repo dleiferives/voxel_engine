@@ -15,21 +15,32 @@
 #include <imgui/backends/imgui_impl_glfw.h>
 #include <imgui/backends/imgui_impl_opengl3.h>
 #include <memory>
-#include <unordered_map>
 
-
-const char vertexShaderSource[] = {
+// Embedded shaders
+const char chunkVertSource[] = {
 #embed "shaders/chunk.vert"
     , 0
 };
-const char fragmentShaderSource[] = {
+const char chunkFragSource[] = {
 #embed "shaders/chunk.frag"
+    , 0
+};
+const char modelVertSource[] = {
+#embed "shaders/model.vert"
+    , 0
+};
+const char modelFragSource[] = {
+#embed "shaders/model.frag"
+    , 0
+};
+const char cullingCompSource[] = {
+#embed "shaders/culling.comp"
     , 0
 };
 
 // Constants
 constexpr int CHUNK_SIZE = 32;
-constexpr float BLOCK_SIZE = 1.0f;
+constexpr size_t MAX_MODEL_INSTANCES = 1000000;
 
 // Camera
 struct Camera {
@@ -52,11 +63,9 @@ struct Manager {
     Camera camera;
 };
 
-// Settings
 const unsigned int SCR_WIDTH = 1280;
 const unsigned int SCR_HEIGHT = 720;
 
-// Globals
 bool first_mouse = true;
 Manager g_manager = {
     .lastX = SCR_WIDTH / 2.0f,
@@ -76,32 +85,73 @@ Manager g_manager = {
     },
 };
 
-// Vertex structure for greedy meshed chunks
-struct Vertex {
-    glm::vec3 position;
-    glm::vec3 normal;
-    glm::vec3 color;
+// Block classification
+enum BlockCategory : uint8_t {
+    CATEGORY_AIR = 0,
+    CATEGORY_SOLID,    // Greedy meshed
+    CATEGORY_MODEL,    // GPU culled instances
 };
 
 // Block types
 enum BlockType : uint8_t {
     BLOCK_AIR = 0,
+    // Solid blocks (greedy meshed)
     BLOCK_STONE,
     BLOCK_DIRT,
     BLOCK_GRASS,
     BLOCK_SAND,
-    BLOCK_WATER,
+    BLOCK_WOOD,
+    BLOCK_LEAVES,
+    // Model blocks (GPU culled)
+    BLOCK_FLOWER_RED,
+    BLOCK_FLOWER_YELLOW,
+    BLOCK_TALL_GRASS,
+    BLOCK_MUSHROOM,
+    BLOCK_CRYSTAL,
     BLOCK_COUNT
 };
 
-// Block colors
-const glm::vec3 BLOCK_COLORS[] = {
-    glm::vec3(0.0f, 0.0f, 0.0f),       // AIR (unused)
-    glm::vec3(0.5f, 0.5f, 0.5f),       // STONE
-    glm::vec3(0.45f, 0.3f, 0.15f),     // DIRT
-    glm::vec3(0.2f, 0.6f, 0.2f),       // GRASS
-    glm::vec3(0.9f, 0.85f, 0.6f),      // SAND
-    glm::vec3(0.2f, 0.4f, 0.8f),       // WATER
+struct BlockInfo {
+    BlockCategory category;
+    glm::vec3 color;
+    float scale;      // For model blocks
+    uint32_t modelId; // Which model mesh to use
+};
+
+const BlockInfo BLOCK_INFO[] = {
+    {CATEGORY_AIR,   glm::vec3(0.0f), 0.0f, 0},                           // AIR
+    {CATEGORY_SOLID, glm::vec3(0.5f, 0.5f, 0.5f), 1.0f, 0},               // STONE
+    {CATEGORY_SOLID, glm::vec3(0.45f, 0.3f, 0.15f), 1.0f, 0},             // DIRT
+    {CATEGORY_SOLID, glm::vec3(0.2f, 0.6f, 0.2f), 1.0f, 0},               // GRASS
+    {CATEGORY_SOLID, glm::vec3(0.9f, 0.85f, 0.6f), 1.0f, 0},              // SAND
+    {CATEGORY_SOLID, glm::vec3(0.55f, 0.35f, 0.15f), 1.0f, 0},            // WOOD
+    {CATEGORY_SOLID, glm::vec3(0.1f, 0.5f, 0.1f), 1.0f, 0},               // LEAVES
+    {CATEGORY_MODEL, glm::vec3(0.9f, 0.2f, 0.2f), 0.4f, 0},               // FLOWER_RED
+    {CATEGORY_MODEL, glm::vec3(0.9f, 0.9f, 0.2f), 0.4f, 0},               // FLOWER_YELLOW
+    {CATEGORY_MODEL, glm::vec3(0.3f, 0.7f, 0.3f), 0.6f, 1},               // TALL_GRASS
+    {CATEGORY_MODEL, glm::vec3(0.8f, 0.7f, 0.6f), 0.3f, 2},               // MUSHROOM
+    {CATEGORY_MODEL, glm::vec3(0.6f, 0.8f, 1.0f), 0.5f, 3},               // CRYSTAL
+};
+
+// Vertex structures
+struct ChunkVertex {
+    glm::vec3 position;
+    glm::vec3 normal;
+    glm::vec3 color;
+};
+
+// Model instance data for GPU culling
+struct ModelInstance {
+    glm::vec4 positionAndScale;  // xyz = position, w = scale
+    glm::vec4 colorAndType;      // xyz = color, w = modelId
+};
+
+// Indirect draw command
+struct DrawArraysIndirectCommand {
+    GLuint vertexCount;
+    GLuint instanceCount;
+    GLuint firstVertex;
+    GLuint baseInstance;
 };
 
 // Face directions
@@ -116,13 +166,19 @@ const glm::vec3 FACE_NORMALS[] = {
 // Chunk class
 class Chunk {
 public:
-    glm::ivec3 chunkPos;  // Position in chunk coordinates
+    glm::ivec3 chunkPos;
     std::array<uint8_t, CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE> blocks;
+
+    // Greedy mesh data
     GLuint VAO = 0, VBO = 0;
     size_t vertexCount = 0;
     bool needsRebuild = true;
     bool isEmpty = true;
     bool meshUploaded = false;
+
+    // Model blocks in this chunk
+    std::vector<ModelInstance> modelBlocks;
+    bool modelsDirty = true;
 
     Chunk(glm::ivec3 pos) : chunkPos(pos) {
         blocks.fill(BLOCK_AIR);
@@ -148,6 +204,7 @@ public:
             return;
         blocks[index(x, y, z)] = type;
         needsRebuild = true;
+        modelsDirty = true;
         isEmpty = false;
     }
 
@@ -155,30 +212,55 @@ public:
         return glm::vec3(chunkPos) * float(CHUNK_SIZE);
     }
 
-    // Get bounding box for frustum culling
     void getBoundingBox(glm::vec3& minPos, glm::vec3& maxPos) const {
         minPos = getWorldPos();
         maxPos = minPos + glm::vec3(CHUNK_SIZE);
     }
+
+    void collectModelBlocks() {
+        if (!modelsDirty) return;
+
+        modelBlocks.clear();
+        glm::vec3 worldBase = getWorldPos();
+
+        for (int z = 0; z < CHUNK_SIZE; z++) {
+            for (int y = 0; y < CHUNK_SIZE; y++) {
+                for (int x = 0; x < CHUNK_SIZE; x++) {
+                    uint8_t type = blocks[index(x, y, z)];
+                    if (type == BLOCK_AIR) continue;
+
+                    const BlockInfo& info = BLOCK_INFO[type];
+                    if (info.category != CATEGORY_MODEL) continue;
+
+                    glm::vec3 pos = worldBase + glm::vec3(x + 0.5f, y + 0.5f, z + 0.5f);
+
+                    ModelInstance inst;
+                    inst.positionAndScale = glm::vec4(pos, info.scale);
+                    inst.colorAndType = glm::vec4(info.color, float(info.modelId));
+                    modelBlocks.push_back(inst);
+                }
+            }
+        }
+
+        modelsDirty = false;
+    }
 };
 
-// Greedy meshing implementation
+// Greedy mesher (only for SOLID blocks)
 class GreedyMesher {
 public:
-    static void mesh(Chunk& chunk, std::vector<Vertex>& vertices) {
+    static void mesh(Chunk& chunk, std::vector<ChunkVertex>& vertices) {
         vertices.clear();
 
-        // For each face direction
         for (int face = 0; face < 6; face++) {
             meshFace(chunk, vertices, face);
         }
     }
 
 private:
-    static void meshFace(Chunk& chunk, std::vector<Vertex>& vertices, int face) {
-        // Determine axis and direction
-        int axis = face / 2;        // 0=X, 1=Y, 2=Z
-        bool positive = face % 2;   // false=negative, true=positive
+    static void meshFace(Chunk& chunk, std::vector<ChunkVertex>& vertices, int face) {
+        int axis = face / 2;
+        bool positive = face % 2;
 
         int u = (axis + 1) % 3;
         int v = (axis + 2) % 3;
@@ -187,13 +269,9 @@ private:
         dir[axis] = positive ? 1 : -1;
 
         glm::vec3 normal = FACE_NORMALS[face];
-
-        // Mask for greedy meshing
         std::array<int, CHUNK_SIZE * CHUNK_SIZE> mask;
 
-        // Iterate through slices
         for (int d = 0; d < CHUNK_SIZE; d++) {
-            // Build mask for this slice
             for (int j = 0; j < CHUNK_SIZE; j++) {
                 for (int i = 0; i < CHUNK_SIZE; i++) {
                     glm::ivec3 pos(0);
@@ -202,18 +280,25 @@ private:
                     pos[v] = j;
 
                     uint8_t block = chunk.getBlock(pos.x, pos.y, pos.z);
+                    const BlockInfo& blockInfo = BLOCK_INFO[block];
 
-                    // Check neighbor
+                    // Only mesh SOLID blocks
+                    if (blockInfo.category != CATEGORY_SOLID) {
+                        mask[i + j * CHUNK_SIZE] = 0;
+                        continue;
+                    }
+
                     glm::ivec3 neighborPos = pos + dir;
                     uint8_t neighbor;
                     if (neighborPos[axis] < 0 || neighborPos[axis] >= CHUNK_SIZE) {
-                        neighbor = BLOCK_AIR;  // Chunk boundary
+                        neighbor = BLOCK_AIR;
                     } else {
                         neighbor = chunk.getBlock(neighborPos.x, neighborPos.y, neighborPos.z);
                     }
 
-                    // Face is visible if current block is solid and neighbor is air
-                    if (block != BLOCK_AIR && neighbor == BLOCK_AIR) {
+                    // Face visible if neighbor is not solid
+                    const BlockInfo& neighborInfo = BLOCK_INFO[neighbor];
+                    if (neighborInfo.category != CATEGORY_SOLID) {
                         mask[i + j * CHUNK_SIZE] = block;
                     } else {
                         mask[i + j * CHUNK_SIZE] = 0;
@@ -221,7 +306,7 @@ private:
                 }
             }
 
-            // Greedy mesh the mask
+            // Greedy mesh
             for (int j = 0; j < CHUNK_SIZE; j++) {
                 for (int i = 0; i < CHUNK_SIZE;) {
                     int blockType = mask[i + j * CHUNK_SIZE];
@@ -230,13 +315,11 @@ private:
                         continue;
                     }
 
-                    // Find width
                     int w = 1;
                     while (i + w < CHUNK_SIZE && mask[i + w + j * CHUNK_SIZE] == blockType) {
                         w++;
                     }
 
-                    // Find height
                     int h = 1;
                     bool done = false;
                     while (j + h < CHUNK_SIZE && !done) {
@@ -249,39 +332,32 @@ private:
                         if (!done) h++;
                     }
 
-                    // Create quad
                     glm::ivec3 pos(0);
                     pos[axis] = d;
                     pos[u] = i;
                     pos[v] = j;
 
                     glm::vec3 worldPos = chunk.getWorldPos() + glm::vec3(pos);
-
-                    // Offset position for positive faces
                     if (positive) {
                         worldPos[axis] += 1.0f;
                     }
 
-                    // Create quad vertices
                     glm::vec3 du(0), dv(0);
                     du[u] = float(w);
                     dv[v] = float(h);
 
-                    glm::vec3 color = BLOCK_COLORS[blockType];
+                    glm::vec3 color = BLOCK_INFO[blockType].color;
 
-                    // Apply simple ambient occlusion-like shading based on face
                     float shade = 1.0f;
                     if (face == FACE_NEG_Y) shade = 0.5f;
                     else if (face == FACE_NEG_X || face == FACE_POS_X) shade = 0.7f;
                     else if (face == FACE_NEG_Z || face == FACE_POS_Z) shade = 0.8f;
                     color *= shade;
 
-                    // Two triangles for the quad
                     if (positive) {
                         vertices.push_back({worldPos, normal, color});
                         vertices.push_back({worldPos + du, normal, color});
                         vertices.push_back({worldPos + du + dv, normal, color});
-
                         vertices.push_back({worldPos, normal, color});
                         vertices.push_back({worldPos + du + dv, normal, color});
                         vertices.push_back({worldPos + dv, normal, color});
@@ -289,13 +365,11 @@ private:
                         vertices.push_back({worldPos, normal, color});
                         vertices.push_back({worldPos + du + dv, normal, color});
                         vertices.push_back({worldPos + du, normal, color});
-
                         vertices.push_back({worldPos, normal, color});
                         vertices.push_back({worldPos + dv, normal, color});
                         vertices.push_back({worldPos + du + dv, normal, color});
                     }
 
-                    // Clear mask
                     for (int l = 0; l < h; l++) {
                         for (int k = 0; k < w; k++) {
                             mask[i + k + (j + l) * CHUNK_SIZE] = 0;
@@ -309,11 +383,244 @@ private:
     }
 };
 
+// Model geometry generator
+class ModelGeometry {
+public:
+    // Cube vertices for model blocks
+    static std::vector<float> cubeVertices;
+
+    static void init() {
+        cubeVertices = {
+            -0.5f, -0.5f, -0.5f,  0.0f,  0.0f, -1.0f,
+             0.5f, -0.5f, -0.5f,  0.0f,  0.0f, -1.0f,
+             0.5f,  0.5f, -0.5f,  0.0f,  0.0f, -1.0f,
+             0.5f,  0.5f, -0.5f,  0.0f,  0.0f, -1.0f,
+            -0.5f,  0.5f, -0.5f,  0.0f,  0.0f, -1.0f,
+            -0.5f, -0.5f, -0.5f,  0.0f,  0.0f, -1.0f,
+
+            -0.5f, -0.5f,  0.5f,  0.0f,  0.0f,  1.0f,
+             0.5f, -0.5f,  0.5f,  0.0f,  0.0f,  1.0f,
+             0.5f,  0.5f,  0.5f,  0.0f,  0.0f,  1.0f,
+             0.5f,  0.5f,  0.5f,  0.0f,  0.0f,  1.0f,
+            -0.5f,  0.5f,  0.5f,  0.0f,  0.0f,  1.0f,
+            -0.5f, -0.5f,  0.5f,  0.0f,  0.0f,  1.0f,
+
+            -0.5f,  0.5f,  0.5f, -1.0f,  0.0f,  0.0f,
+            -0.5f,  0.5f, -0.5f, -1.0f,  0.0f,  0.0f,
+            -0.5f, -0.5f, -0.5f, -1.0f,  0.0f,  0.0f,
+            -0.5f, -0.5f, -0.5f, -1.0f,  0.0f,  0.0f,
+            -0.5f, -0.5f,  0.5f, -1.0f,  0.0f,  0.0f,
+            -0.5f,  0.5f,  0.5f, -1.0f,  0.0f,  0.0f,
+
+             0.5f,  0.5f,  0.5f,  1.0f,  0.0f,  0.0f,
+             0.5f,  0.5f, -0.5f,  1.0f,  0.0f,  0.0f,
+             0.5f, -0.5f, -0.5f,  1.0f,  0.0f,  0.0f,
+             0.5f, -0.5f, -0.5f,  1.0f,  0.0f,  0.0f,
+             0.5f, -0.5f,  0.5f,  1.0f,  0.0f,  0.0f,
+             0.5f,  0.5f,  0.5f,  1.0f,  0.0f,  0.0f,
+
+            -0.5f, -0.5f, -0.5f,  0.0f, -1.0f,  0.0f,
+             0.5f, -0.5f, -0.5f,  0.0f, -1.0f,  0.0f,
+             0.5f, -0.5f,  0.5f,  0.0f, -1.0f,  0.0f,
+             0.5f, -0.5f,  0.5f,  0.0f, -1.0f,  0.0f,
+            -0.5f, -0.5f,  0.5f,  0.0f, -1.0f,  0.0f,
+            -0.5f, -0.5f, -0.5f,  0.0f, -1.0f,  0.0f,
+
+            -0.5f,  0.5f, -0.5f,  0.0f,  1.0f,  0.0f,
+             0.5f,  0.5f, -0.5f,  0.0f,  1.0f,  0.0f,
+             0.5f,  0.5f,  0.5f,  0.0f,  1.0f,  0.0f,
+             0.5f,  0.5f,  0.5f,  0.0f,  1.0f,  0.0f,
+            -0.5f,  0.5f,  0.5f,  0.0f,  1.0f,  0.0f,
+            -0.5f,  0.5f, -0.5f,  0.0f,  1.0f,  0.0f,
+        };
+    }
+};
+
+std::vector<float> ModelGeometry::cubeVertices;
+
+// GPU Model Renderer with compute culling
+class ModelRenderer {
+public:
+    GLuint modelVAO = 0, modelVBO = 0;
+    GLuint inputSSBO = 0;
+    GLuint outputSSBO = 0;
+    GLuint indirectBuffer = 0;
+    GLuint atomicBuffer = 0;
+    GLuint computeProgram = 0;
+    GLuint renderProgram = 0;
+
+    std::vector<ModelInstance> allInstances;
+    GLuint visibleCount = 0;
+
+    void init(const char* computeSource, const char* vertSource, const char* fragSource) {
+        ModelGeometry::init();
+
+        // Compile compute shader
+        GLuint cs = compileShader(GL_COMPUTE_SHADER, computeSource);
+        computeProgram = glCreateProgram();
+        glAttachShader(computeProgram, cs);
+        glLinkProgram(computeProgram);
+        glDeleteShader(cs);
+
+        // Compile render shaders
+        GLuint vs = compileShader(GL_VERTEX_SHADER, vertSource);
+        GLuint fs = compileShader(GL_FRAGMENT_SHADER, fragSource);
+        renderProgram = glCreateProgram();
+        glAttachShader(renderProgram, vs);
+        glAttachShader(renderProgram, fs);
+        glLinkProgram(renderProgram);
+        glDeleteShader(vs);
+        glDeleteShader(fs);
+
+        // Setup VAO for model geometry
+        glGenVertexArrays(1, &modelVAO);
+        glGenBuffers(1, &modelVBO);
+
+        glBindVertexArray(modelVAO);
+        glBindBuffer(GL_ARRAY_BUFFER, modelVBO);
+        glBufferData(GL_ARRAY_BUFFER,
+            ModelGeometry::cubeVertices.size() * sizeof(float),
+            ModelGeometry::cubeVertices.data(), GL_STATIC_DRAW);
+
+        // Position
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
+        glEnableVertexAttribArray(0);
+        // Normal
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
+        glEnableVertexAttribArray(1);
+
+        // Create SSBOs
+        glGenBuffers(1, &inputSSBO);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, inputSSBO);
+        glBufferData(GL_SHADER_STORAGE_BUFFER,
+            MAX_MODEL_INSTANCES * sizeof(ModelInstance), nullptr, GL_DYNAMIC_DRAW);
+
+        glGenBuffers(1, &outputSSBO);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, outputSSBO);
+        glBufferData(GL_SHADER_STORAGE_BUFFER,
+            MAX_MODEL_INSTANCES * sizeof(ModelInstance), nullptr, GL_DYNAMIC_DRAW);
+
+        // Bind output as instance data
+        glBindBuffer(GL_ARRAY_BUFFER, outputSSBO);
+        // Instance position + scale
+        glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, sizeof(ModelInstance),
+            (void*)offsetof(ModelInstance, positionAndScale));
+        glEnableVertexAttribArray(2);
+        glVertexAttribDivisor(2, 1);
+        // Instance color + type
+        glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, sizeof(ModelInstance),
+            (void*)offsetof(ModelInstance, colorAndType));
+        glEnableVertexAttribArray(3);
+        glVertexAttribDivisor(3, 1);
+
+        // Indirect buffer
+        glGenBuffers(1, &indirectBuffer);
+        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, indirectBuffer);
+        DrawArraysIndirectCommand cmd = { 36, 0, 0, 0 };
+        glBufferData(GL_DRAW_INDIRECT_BUFFER, sizeof(cmd), &cmd, GL_DYNAMIC_DRAW);
+
+        // Atomic counter
+        glGenBuffers(1, &atomicBuffer);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, atomicBuffer);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(GLuint), nullptr, GL_DYNAMIC_DRAW);
+
+        glBindVertexArray(0);
+    }
+
+    void uploadInstances() {
+        if (allInstances.empty()) return;
+
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, inputSSBO);
+        glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
+            allInstances.size() * sizeof(ModelInstance), allInstances.data());
+    }
+
+    void cullAndRender(const glm::vec4 frustumPlanes[6], const glm::mat4& view,
+                       const glm::mat4& projection, const glm::vec3& viewPos) {
+        if (allInstances.empty()) {
+            visibleCount = 0;
+            return;
+        }
+
+        GLuint totalInstances = static_cast<GLuint>(allInstances.size());
+
+        // Reset atomic counter
+        GLuint zero = 0;
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, atomicBuffer);
+        glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(GLuint), &zero);
+
+        // Dispatch compute shader
+        glUseProgram(computeProgram);
+        glUniform4fv(glGetUniformLocation(computeProgram, "frustumPlanes"), 6,
+            glm::value_ptr(frustumPlanes[0]));
+        glUniform1ui(glGetUniformLocation(computeProgram, "totalInstances"), totalInstances);
+
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, inputSSBO);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, outputSSBO);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, indirectBuffer);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, atomicBuffer);
+
+        GLuint numGroups = (totalInstances + 255) / 256;
+        glDispatchCompute(numGroups, 1, 1);
+
+        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_COMMAND_BARRIER_BIT);
+
+        // Copy count to indirect buffer
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, atomicBuffer);
+        glBindBuffer(GL_COPY_WRITE_BUFFER, indirectBuffer);
+        glCopyBufferSubData(GL_SHADER_STORAGE_BUFFER, GL_COPY_WRITE_BUFFER,
+            0, offsetof(DrawArraysIndirectCommand, instanceCount), sizeof(GLuint));
+
+        // Read back for stats
+        glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(GLuint), &visibleCount);
+
+        // Render
+        glUseProgram(renderProgram);
+        glUniformMatrix4fv(glGetUniformLocation(renderProgram, "view"), 1, GL_FALSE,
+            glm::value_ptr(view));
+        glUniformMatrix4fv(glGetUniformLocation(renderProgram, "projection"), 1, GL_FALSE,
+            glm::value_ptr(projection));
+        glUniform3fv(glGetUniformLocation(renderProgram, "viewPos"), 1,
+            glm::value_ptr(viewPos));
+
+        glBindVertexArray(modelVAO);
+        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, indirectBuffer);
+        glDrawArraysIndirect(GL_TRIANGLES, nullptr);
+    }
+
+    void cleanup() {
+        glDeleteVertexArrays(1, &modelVAO);
+        glDeleteBuffers(1, &modelVBO);
+        glDeleteBuffers(1, &inputSSBO);
+        glDeleteBuffers(1, &outputSSBO);
+        glDeleteBuffers(1, &indirectBuffer);
+        glDeleteBuffers(1, &atomicBuffer);
+        glDeleteProgram(computeProgram);
+        glDeleteProgram(renderProgram);
+    }
+
+private:
+    GLuint compileShader(GLenum type, const char* source) {
+        GLuint shader = glCreateShader(type);
+        glShaderSource(shader, 1, &source, nullptr);
+        glCompileShader(shader);
+
+        GLint success;
+        glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
+        if (!success) {
+            char infoLog[512];
+            glGetShaderInfoLog(shader, 512, nullptr, infoLog);
+            std::cerr << "Shader error: " << infoLog << std::endl;
+        }
+        return shader;
+    }
+};
+
 // Chunk manager
 class ChunkManager {
 public:
     std::unordered_map<int64_t, std::unique_ptr<Chunk>> chunks;
-    std::vector<Vertex> meshBuffer;  // Reusable buffer
+    std::vector<ChunkVertex> meshBuffer;
 
     int64_t hashPos(glm::ivec3 pos) const {
         return (int64_t(pos.x) & 0xFFFFF) |
@@ -337,13 +644,11 @@ public:
         Chunk* chunk = createChunk(chunkPos);
         glm::vec3 worldBase = chunk->getWorldPos();
 
-        // Simple terrain generation
         for (int z = 0; z < CHUNK_SIZE; z++) {
             for (int x = 0; x < CHUNK_SIZE; x++) {
                 float wx = worldBase.x + x;
                 float wz = worldBase.z + z;
 
-                // Simple height function
                 float height = 16.0f +
                     8.0f * sin(wx * 0.05f) * cos(wz * 0.05f) +
                     4.0f * sin(wx * 0.1f + 1.0f) * sin(wz * 0.1f);
@@ -357,6 +662,25 @@ public:
                         chunk->setBlock(x, y, z, BLOCK_DIRT);
                     } else if (wy < height) {
                         chunk->setBlock(x, y, z, BLOCK_GRASS);
+
+                        // Add decorations on grass
+                        int iy = y + 1;
+                        if (iy < CHUNK_SIZE && chunk->getBlock(x, iy, z) == BLOCK_AIR) {
+                            float r = fmodf(wx * 12.9898f + wz * 78.233f, 1.0f);
+                            r = fmodf(sinf(r * 43758.5453f) * 0.5f + 0.5f, 1.0f);
+
+                            if (r < 0.02f) {
+                                chunk->setBlock(x, iy, z, BLOCK_FLOWER_RED);
+                            } else if (r < 0.04f) {
+                                chunk->setBlock(x, iy, z, BLOCK_FLOWER_YELLOW);
+                            } else if (r < 0.15f) {
+                                chunk->setBlock(x, iy, z, BLOCK_TALL_GRASS);
+                            } else if (r < 0.17f) {
+                                chunk->setBlock(x, iy, z, BLOCK_MUSHROOM);
+                            } else if (r < 0.18f) {
+                                chunk->setBlock(x, iy, z, BLOCK_CRYSTAL);
+                            }
+                        }
                     }
                 }
             }
@@ -377,7 +701,6 @@ public:
 
         chunk->isEmpty = false;
 
-        // Create/update GPU buffers
         if (!chunk->VAO) {
             glGenVertexArrays(1, &chunk->VAO);
             glGenBuffers(1, &chunk->VBO);
@@ -386,22 +709,19 @@ public:
         glBindVertexArray(chunk->VAO);
         glBindBuffer(GL_ARRAY_BUFFER, chunk->VBO);
         glBufferData(GL_ARRAY_BUFFER,
-            meshBuffer.size() * sizeof(Vertex),
+            meshBuffer.size() * sizeof(ChunkVertex),
             meshBuffer.data(), GL_STATIC_DRAW);
 
-        // Position
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex),
-            (void*)offsetof(Vertex, position));
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex),
+            (void*)offsetof(ChunkVertex, position));
         glEnableVertexAttribArray(0);
 
-        // Normal
-        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex),
-            (void*)offsetof(Vertex, normal));
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex),
+            (void*)offsetof(ChunkVertex, normal));
         glEnableVertexAttribArray(1);
 
-        // Color
-        glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex),
-            (void*)offsetof(Vertex, color));
+        glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex),
+            (void*)offsetof(ChunkVertex, color));
         glEnableVertexAttribArray(2);
 
         glBindVertexArray(0);
@@ -409,37 +729,40 @@ public:
         chunk->needsRebuild = false;
         chunk->meshUploaded = true;
     }
+
+    void collectAllModelBlocks(ModelRenderer& renderer) {
+        renderer.allInstances.clear();
+
+        for (auto& [hash, chunk] : chunks) {
+            chunk->collectModelBlocks();
+            renderer.allInstances.insert(
+                renderer.allInstances.end(),
+                chunk->modelBlocks.begin(),
+                chunk->modelBlocks.end()
+            );
+        }
+
+        renderer.uploadInstances();
+    }
 };
 
-// Frustum culling
+// Frustum
 class Frustum {
 public:
     glm::vec4 planes[6];
 
     void extract(const glm::mat4& vp) {
-        // Left
-        planes[0] = glm::vec4(
-            vp[0][3] + vp[0][0], vp[1][3] + vp[1][0],
+        planes[0] = glm::vec4(vp[0][3] + vp[0][0], vp[1][3] + vp[1][0],
             vp[2][3] + vp[2][0], vp[3][3] + vp[3][0]);
-        // Right
-        planes[1] = glm::vec4(
-            vp[0][3] - vp[0][0], vp[1][3] - vp[1][0],
+        planes[1] = glm::vec4(vp[0][3] - vp[0][0], vp[1][3] - vp[1][0],
             vp[2][3] - vp[2][0], vp[3][3] - vp[3][0]);
-        // Bottom
-        planes[2] = glm::vec4(
-            vp[0][3] + vp[0][1], vp[1][3] + vp[1][1],
+        planes[2] = glm::vec4(vp[0][3] + vp[0][1], vp[1][3] + vp[1][1],
             vp[2][3] + vp[2][1], vp[3][3] + vp[3][1]);
-        // Top
-        planes[3] = glm::vec4(
-            vp[0][3] - vp[0][1], vp[1][3] - vp[1][1],
+        planes[3] = glm::vec4(vp[0][3] - vp[0][1], vp[1][3] - vp[1][1],
             vp[2][3] - vp[2][1], vp[3][3] - vp[3][1]);
-        // Near
-        planes[4] = glm::vec4(
-            vp[0][3] + vp[0][2], vp[1][3] + vp[1][2],
+        planes[4] = glm::vec4(vp[0][3] + vp[0][2], vp[1][3] + vp[1][2],
             vp[2][3] + vp[2][2], vp[3][3] + vp[3][2]);
-        // Far
-        planes[5] = glm::vec4(
-            vp[0][3] - vp[0][2], vp[1][3] - vp[1][2],
+        planes[5] = glm::vec4(vp[0][3] - vp[0][2], vp[1][3] - vp[1][2],
             vp[2][3] - vp[2][2], vp[3][3] - vp[3][2]);
 
         for (int i = 0; i < 6; i++) {
@@ -455,9 +778,8 @@ public:
                 planes[i].y > 0 ? maxPos.y : minPos.y,
                 planes[i].z > 0 ? maxPos.z : minPos.z
             );
-            if (glm::dot(glm::vec3(planes[i]), p) + planes[i].w < 0) {
+            if (glm::dot(glm::vec3(planes[i]), p) + planes[i].w < 0)
                 return false;
-            }
         }
         return true;
     }
@@ -511,9 +833,6 @@ void processInput(GLFWwindow* window) {
     }
 
     if (!g_manager.ui_mode) {
-        if (glfwGetInputMode(window, GLFW_CURSOR) != GLFW_CURSOR_DISABLED)
-            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-
         float speed = g_manager.camera.speed * g_manager.delta_time;
         if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
             g_manager.camera.pos += speed * g_manager.camera.front;
@@ -540,7 +859,7 @@ GLuint compileShader(GLenum type, const char* source) {
     if (!success) {
         char infoLog[512];
         glGetShaderInfoLog(shader, 512, nullptr, infoLog);
-        std::cerr << "Shader compilation error:\n" << infoLog << std::endl;
+        std::cerr << "Shader error:\n" << infoLog << std::endl;
     }
     return shader;
 }
@@ -556,7 +875,7 @@ int main() {
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
     GLFWwindow* window = glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT,
-        "Chunked Voxels - Greedy Meshing + Frustum Culling", nullptr, nullptr);
+        "Hybrid Voxels - Greedy Mesh + GPU Culled Models", nullptr, nullptr);
     if (!window) {
         std::cerr << "Failed to create GLFW window\n";
         glfwTerminate();
@@ -580,21 +899,25 @@ int main() {
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
 
-    // Compile shaders
-    GLuint vertexShader = compileShader(GL_VERTEX_SHADER, vertexShaderSource);
-    GLuint fragmentShader = compileShader(GL_FRAGMENT_SHADER, fragmentShaderSource);
+    // Compile chunk shaders
+    GLuint chunkVS = compileShader(GL_VERTEX_SHADER, chunkVertSource);
+    GLuint chunkFS = compileShader(GL_FRAGMENT_SHADER, chunkFragSource);
+    GLuint chunkProgram = glCreateProgram();
+    glAttachShader(chunkProgram, chunkVS);
+    glAttachShader(chunkProgram, chunkFS);
+    glLinkProgram(chunkProgram);
+    glDeleteShader(chunkVS);
+    glDeleteShader(chunkFS);
 
-    GLuint shaderProgram = glCreateProgram();
-    glAttachShader(shaderProgram, vertexShader);
-    glAttachShader(shaderProgram, fragmentShader);
-    glLinkProgram(shaderProgram);
-    glDeleteShader(vertexShader);
-    glDeleteShader(fragmentShader);
+    // Initialize model renderer
+    ModelRenderer modelRenderer;
+    modelRenderer.init(cullingCompSource, modelVertSource, modelFragSource);
 
     // Generate chunks
     ChunkManager chunkManager;
-    const int WORLD_SIZE = 4;  // 4x4x4 chunks = 128x128x128 blocks
+    const int WORLD_SIZE = 4;
 
+    std::cout << "Generating terrain..." << std::endl;
     for (int z = 0; z < WORLD_SIZE; z++) {
         for (int y = 0; y < WORLD_SIZE; y++) {
             for (int x = 0; x < WORLD_SIZE; x++) {
@@ -603,10 +926,14 @@ int main() {
         }
     }
 
-    // Build all meshes
+    std::cout << "Building meshes..." << std::endl;
     for (auto& [hash, chunk] : chunkManager.chunks) {
         chunkManager.rebuildChunkMesh(chunk.get());
     }
+
+    std::cout << "Collecting model blocks..." << std::endl;
+    chunkManager.collectAllModelBlocks(modelRenderer);
+    std::cout << "Total model instances: " << modelRenderer.allInstances.size() << std::endl;
 
     // Setup ImGui
     IMGUI_CHECKVERSION();
@@ -617,10 +944,8 @@ int main() {
     ImGui_ImplOpenGL3_Init("#version 460");
 
     Frustum frustum;
-    uint32_t totalChunks = 0;
-    uint32_t visibleChunks = 0;
-    uint32_t totalVertices = 0;
-    uint32_t visibleVertices = 0;
+    uint32_t totalChunks = 0, visibleChunks = 0;
+    uint32_t totalMeshVerts = 0, visibleMeshVerts = 0;
 
     while (!glfwWindowShouldClose(window)) {
         float currentFrame = static_cast<float>(glfwGetTime());
@@ -629,7 +954,6 @@ int main() {
 
         processInput(window);
 
-        // Build matrices
         glm::mat4 projection = glm::perspective(
             glm::radians(60.0f),
             (float)SCR_WIDTH / (float)SCR_HEIGHT,
@@ -645,26 +969,28 @@ int main() {
 
         frustum.extract(vp);
 
-        // Clear
         glClearColor(0.4f, 0.6f, 0.9f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        glUseProgram(shaderProgram);
-        glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "view"), 1, GL_FALSE, glm::value_ptr(view));
-        glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
-        glUniform3fv(glGetUniformLocation(shaderProgram, "viewPos"), 1, glm::value_ptr(g_manager.camera.pos));
+        // Render greedy-meshed chunks
+        glUseProgram(chunkProgram);
+        glUniformMatrix4fv(glGetUniformLocation(chunkProgram, "view"), 1, GL_FALSE,
+            glm::value_ptr(view));
+        glUniformMatrix4fv(glGetUniformLocation(chunkProgram, "projection"), 1, GL_FALSE,
+            glm::value_ptr(projection));
+        glUniform3fv(glGetUniformLocation(chunkProgram, "viewPos"), 1,
+            glm::value_ptr(g_manager.camera.pos));
 
-        // Render chunks with frustum culling
         totalChunks = 0;
         visibleChunks = 0;
-        totalVertices = 0;
-        visibleVertices = 0;
+        totalMeshVerts = 0;
+        visibleMeshVerts = 0;
 
         for (auto& [hash, chunk] : chunkManager.chunks) {
             if (chunk->isEmpty || !chunk->meshUploaded) continue;
 
             totalChunks++;
-            totalVertices += chunk->vertexCount;
+            totalMeshVerts += chunk->vertexCount;
 
             glm::vec3 minPos, maxPos;
             chunk->getBoundingBox(minPos, maxPos);
@@ -672,11 +998,16 @@ int main() {
             if (!frustum.isBoxVisible(minPos, maxPos)) continue;
 
             visibleChunks++;
-            visibleVertices += chunk->vertexCount;
+            visibleMeshVerts += chunk->vertexCount;
 
             glBindVertexArray(chunk->VAO);
             glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(chunk->vertexCount));
         }
+
+        // Render GPU-culled model blocks
+        glDisable(GL_CULL_FACE);  // Models might need both sides
+        modelRenderer.cullAndRender(frustum.planes, view, projection, g_manager.camera.pos);
+        glEnable(GL_CULL_FACE);
 
         // ImGui
         ImGui_ImplOpenGL3_NewFrame();
@@ -698,17 +1029,22 @@ int main() {
         ImGui::Separator();
         ImGui::Text("FPS: %.1f", io.Framerate);
         ImGui::Text("Frame Time: %.3f ms", 1000.0f / io.Framerate);
+
         ImGui::Separator();
-        ImGui::Text("Chunk Size: %dx%dx%d", CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE);
-        ImGui::Text("Total Chunks: %u", totalChunks);
-        ImGui::Text("Visible Chunks: %u", visibleChunks);
-        ImGui::Text("Chunks Culled: %.1f%%",
-            totalChunks > 0 ? 100.0f * (1.0f - (float)visibleChunks / totalChunks) : 0.0f);
+        ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "Solid Blocks (Greedy Mesh):");
+        ImGui::Text("  Chunks: %u / %u visible", visibleChunks, totalChunks);
+        ImGui::Text("  Vertices: %u / %u", visibleMeshVerts, totalMeshVerts);
+        ImGui::Text("  Triangles: %u", visibleMeshVerts / 3);
+
         ImGui::Separator();
-        ImGui::Text("Total Vertices: %u", totalVertices);
-        ImGui::Text("Visible Vertices: %u", visibleVertices);
-        ImGui::Text("Total Triangles: %u", totalVertices / 3);
-        ImGui::Text("Visible Triangles: %u", visibleVertices / 3);
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.5f, 1.0f), "Model Blocks (GPU Culled):");
+        ImGui::Text("  Total: %zu", modelRenderer.allInstances.size());
+        ImGui::Text("  Visible: %u", modelRenderer.visibleCount);
+        ImGui::Text("  Culled: %.1f%%",
+            modelRenderer.allInstances.size() > 0
+                ? 100.0f * (1.0f - (float)modelRenderer.visibleCount / modelRenderer.allInstances.size())
+                : 0.0f);
+
         ImGui::Separator();
         ImGui::Text("Camera: %.1f, %.1f, %.1f",
             g_manager.camera.pos.x, g_manager.camera.pos.y, g_manager.camera.pos.z);
@@ -728,7 +1064,8 @@ int main() {
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
 
-    glDeleteProgram(shaderProgram);
+    glDeleteProgram(chunkProgram);
+    modelRenderer.cleanup();
 
     glfwDestroyWindow(window);
     glfwTerminate();
