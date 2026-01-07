@@ -41,6 +41,7 @@ add_executable(voxel
 target_include_directories(voxel PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/external/glm_tmp
     ${CMAKE_CURRENT_SOURCE_DIR}/external/imgui
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
 target_link_libraries(voxel PRIVATE

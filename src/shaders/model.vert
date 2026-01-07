@@ -2,8 +2,8 @@
 
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
-layout(location = 2) in vec4 aInstancePosScale;  // xyz = position, w = scale
-layout(location = 3) in vec4 aInstanceColorType; // xyz = color, w = modelId
+layout(location = 2) in vec4 aInstancePosScale;
+layout(location = 3) in vec4 aInstanceColorType;
 
 uniform mat4 view;
 uniform mat4 projection;

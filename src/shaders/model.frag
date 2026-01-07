@@ -16,10 +16,8 @@ void main() {
     float diff = max(dot(norm, lightDir), 0.0);
     vec3 result = Color * (ambient + diff * 0.6);
 
-    // Slight emissive for crystals/special blocks
     result += Color * 0.1;
 
-    // Fog
     float dist = length(FragPos - viewPos);
     float fogFactor = clamp(exp(-dist * 0.003), 0.0, 1.0);
     vec3 fogColor = vec3(0.4, 0.6, 0.9);
