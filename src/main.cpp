@@ -12,13 +12,14 @@
 const char* vertexShaderSource = R"glsl(
 #version 460 core
 layout (location = 0) in vec3 aPos;
+layout (location = 1) in vec3 aOffset;
 out vec3 ourColor;
 uniform mat4 model;
 uniform mat4 view;
 uniform mat4 projection;
 void main() {
-    gl_Position = projection * view * model * vec4(aPos, 1.0);
-    ourColor = aPos;
+    gl_Position = projection * view * model * vec4(aPos + aOffset, 1.0);
+    ourColor = aPos + vec3(0.5);
 }
 )glsl";
 
@@ -207,6 +208,16 @@ int main()
 
     glEnable(GL_DEPTH_TEST);
 
+    // Setup our offset buffers thing
+    std::vector<glm::vec3> cube_positions;
+    float offset = 2.0f;
+    for (int y = -10; y < 10; y += 2) {
+        for (int x = -10; x < 10; x += 2) {
+            for (int z = -10; z < 10; z += 2) {
+                cube_positions.push_back(glm::vec3(x, y, z));
+            }
+        }
+    }
 
     // Compile Shaders
     unsigned int vertexShader = glCreateShader(GL_VERTEX_SHADER);
@@ -226,10 +237,12 @@ int main()
 
     // Setup buffers
     //
-    unsigned int VBO, VAO;
+    unsigned int VBO, VAO, cubesVBO;
     glGenVertexArrays(1, &VAO);
     glGenBuffers(1, &VBO);
+    glGenBuffers(1, &cubesVBO);
 
+    // cube
     glBindVertexArray(VAO);
     glBindBuffer(GL_ARRAY_BUFFER, VBO);
     glBufferData(GL_ARRAY_BUFFER, sizeof(g_cube), g_cube, GL_STATIC_DRAW);
@@ -238,6 +251,20 @@ int main()
     // Stride could be 3 * sizeof(float). But since we're tightly packing I will just do that explicitly
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, (void*)0);
     glEnableVertexAttribArray(0);
+
+    // cubes positions
+    glBindBuffer(GL_ARRAY_BUFFER, cubesVBO);
+    glBufferData(
+        GL_ARRAY_BUFFER,
+        cube_positions.size() * sizeof(glm::vec3),
+        cube_positions.data(),
+        GL_STATIC_DRAW
+    );
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(1);
+
+    // We are changing per instance not per vertex
+    glVertexAttribDivisor(1, 1);
 
 
     while (!glfwWindowShouldClose(window)) {
@@ -263,7 +290,7 @@ int main()
         glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
 
         glBindVertexArray(VAO);
-        glDrawArrays(GL_TRIANGLES, 0, 36);
+        glDrawArraysInstanced(GL_TRIANGLES, 0, 36, (GLsizei)cube_positions.size());
 
         glfwSwapBuffers(window);
         glfwPollEvents();
@@ -271,6 +298,7 @@ int main()
 
     glDeleteVertexArrays(1, &VAO);
     glDeleteBuffers(1, &VBO);
+    glDeleteBuffers(1, &cubesVBO);
     glDeleteProgram(shaderProgram);
 
     glfwDestroyWindow(window);
