@@ -1,11 +1,16 @@
 #version 460 core
-layout (location = 0) in vec3 aPos;
-layout (location = 1) in vec3 aOffset;
-out vec3 ourColor;
+// cube.vert
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aInstancePos;
+
 uniform mat4 model;
 uniform mat4 view;
 uniform mat4 projection;
+
+out vec3 FragPos;
+
 void main() {
-    gl_Position = projection * view * model * vec4(aPos + aOffset, 1.0);
-    ourColor = aPos + vec3(0.5);
+    vec3 worldPos = aPos + aInstancePos;
+    FragPos = worldPos;
+    gl_Position = projection * view * model * vec4(worldPos, 1.0);
 }

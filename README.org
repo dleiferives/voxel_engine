@@ -12,6 +12,8 @@ This was no faster either
 *** CPU frustum culling
 Just going to try to reduce the number of fellows on the gpu that the gpu is being asked to render. The shit that we can see
 
+Again this did not speed her up whatsoever...
+
 ** Chunk Structuring
 We need to setup the chunks so that they are optimized within singular blocks, This will allow for better utilization of the hardware. However this will cause there to be more issues with the "distant horizons" style of LOD.
 

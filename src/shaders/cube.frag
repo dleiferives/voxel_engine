@@ -1,6 +1,11 @@
 #version 460 core
+// cube.frag
+
+in vec3 FragPos;
 out vec4 FragColor;
-in vec3 ourColor;
+
 void main() {
-    FragColor = vec4(ourColor, 1.0);
+    // Simple coloring based on position
+    vec3 color = normalize(abs(FragPos)) * 0.5 + 0.5;
+    FragColor = vec4(color, 1.0);
 }

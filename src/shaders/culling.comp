@@ -1,0 +1,59 @@
+#version 460 core
+// culling.comp
+
+layout(local_size_x = 256) in;
+
+// Frustum planes (6 planes: left, right, bottom, top, near, far)
+uniform vec4 frustumPlanes[6];
+uniform uint totalCubes;
+
+// Input: all cube positions
+layout(std430, binding = 0) readonly buffer InputPositions {
+    vec4 inPositions[];
+};
+
+// Output: visible cube positions
+layout(std430, binding = 1) writeonly buffer OutputPositions {
+    vec4 outPositions[];
+};
+
+// Indirect draw command buffer
+layout(std430, binding = 2) buffer DrawCommand {
+    uint vertexCount;
+    uint instanceCount;
+    uint firstVertex;
+    uint baseInstance;
+};
+
+// Atomic counter for visible instances
+layout(std430, binding = 3) buffer AtomicCounter {
+    uint visibleCount;
+};
+
+// Test if a sphere is inside the frustum
+// Using sphere approximation for cube (radius = 0.866 for unit cube)
+bool isInFrustum(vec3 center, float radius) {
+    for (int i = 0; i < 6; i++) {
+        float distance = dot(frustumPlanes[i].xyz, center) + frustumPlanes[i].w;
+        if (distance < -radius) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= totalCubes) return;
+
+    vec3 cubePos = inPositions[idx].xyz;
+
+    // Bounding sphere radius for a unit cube (half diagonal = sqrt(3)/2 ≈ 0.866)
+    float radius = 0.866;
+
+    if (isInFrustum(cubePos, radius)) {
+        uint outIdx = atomicAdd(visibleCount, 1);
+        outPositions[outIdx] = vec4(cubePos, 1.0);
+    }
+}
