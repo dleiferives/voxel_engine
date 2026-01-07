@@ -1,5 +1,8 @@
 #include <iostream>
 #include <vector>
+#include <unordered_map>
+#include <array>
+#include <cstring>
 
 #include <glad/gl.h>
 #include <GLFW/glfw3.h>
@@ -11,22 +14,25 @@
 #include <imgui/imgui.h>
 #include <imgui/backends/imgui_impl_glfw.h>
 #include <imgui/backends/imgui_impl_opengl3.h>
+#include <memory>
+#include <unordered_map>
+
 
 const char vertexShaderSource[] = {
-#embed "shaders/cube.vert"
+#embed "shaders/chunk.vert"
     , 0
 };
 const char fragmentShaderSource[] = {
-#embed "shaders/cube.frag"
-    , 0
-};
-const char computeShaderSource[] = {
-#embed "shaders/culling.comp"
+#embed "shaders/chunk.frag"
     , 0
 };
 
+// Constants
+constexpr int CHUNK_SIZE = 32;
+constexpr float BLOCK_SIZE = 1.0f;
+
 // Camera
-typedef struct {
+struct Camera {
     glm::vec3 pos;
     glm::vec3 front;
     glm::vec3 up;
@@ -35,16 +41,16 @@ typedef struct {
     float sensitivity;
     float speed;
     float render_distance;
-} Camera;
+};
 
-typedef struct {
+struct Manager {
     float lastX;
     float lastY;
     float delta_time;
     float last_frame;
     bool ui_mode;
     Camera camera;
-} Manager;
+};
 
 // Settings
 const unsigned int SCR_WIDTH = 1280;
@@ -59,38 +65,402 @@ Manager g_manager = {
     .last_frame = 0.0f,
     .ui_mode = false,
     .camera = {
-        .pos   = glm::vec3(0.0f, 0.0f, 3.0f),
+        .pos   = glm::vec3(48.0f, 48.0f, 48.0f),
         .front = glm::vec3(0.0f, 0.0f, -1.0f),
         .up    = glm::vec3(0.0f, 1.0f, 0.0f),
-        .yaw   = -90.0f,
-        .pitch = 0.0f,
+        .yaw   = -135.0f,
+        .pitch = -30.0f,
         .sensitivity = 0.1f,
-        .speed = 30.0f,
-        .render_distance = 300.0f,
+        .speed = 50.0f,
+        .render_distance = 500.0f,
     },
 };
 
-float g_cube[] = {
-    -0.5f, -0.5f, -0.5f,  0.5f, -0.5f, -0.5f,  0.5f,  0.5f, -0.5f,
-     0.5f,  0.5f, -0.5f, -0.5f,  0.5f, -0.5f, -0.5f, -0.5f, -0.5f,
-    -0.5f, -0.5f,  0.5f,  0.5f, -0.5f,  0.5f,  0.5f,  0.5f,  0.5f,
-     0.5f,  0.5f,  0.5f, -0.5f,  0.5f,  0.5f, -0.5f, -0.5f,  0.5f,
-    -0.5f,  0.5f,  0.5f, -0.5f,  0.5f, -0.5f, -0.5f, -0.5f, -0.5f,
-    -0.5f, -0.5f, -0.5f, -0.5f, -0.5f,  0.5f, -0.5f,  0.5f,  0.5f,
-     0.5f,  0.5f,  0.5f,  0.5f,  0.5f, -0.5f,  0.5f, -0.5f, -0.5f,
-     0.5f, -0.5f, -0.5f,  0.5f, -0.5f,  0.5f,  0.5f,  0.5f,  0.5f,
-    -0.5f, -0.5f, -0.5f,  0.5f, -0.5f, -0.5f,  0.5f, -0.5f,  0.5f,
-     0.5f, -0.5f,  0.5f, -0.5f, -0.5f,  0.5f, -0.5f, -0.5f, -0.5f,
-    -0.5f,  0.5f, -0.5f,  0.5f,  0.5f, -0.5f,  0.5f,  0.5f,  0.5f,
-     0.5f,  0.5f,  0.5f, -0.5f,  0.5f,  0.5f, -0.5f,  0.5f, -0.5f,
+// Vertex structure for greedy meshed chunks
+struct Vertex {
+    glm::vec3 position;
+    glm::vec3 normal;
+    glm::vec3 color;
 };
 
-// Indirect draw command structure
-struct DrawArraysIndirectCommand {
-    GLuint vertexCount;
-    GLuint instanceCount;
-    GLuint firstVertex;
-    GLuint baseInstance;
+// Block types
+enum BlockType : uint8_t {
+    BLOCK_AIR = 0,
+    BLOCK_STONE,
+    BLOCK_DIRT,
+    BLOCK_GRASS,
+    BLOCK_SAND,
+    BLOCK_WATER,
+    BLOCK_COUNT
+};
+
+// Block colors
+const glm::vec3 BLOCK_COLORS[] = {
+    glm::vec3(0.0f, 0.0f, 0.0f),       // AIR (unused)
+    glm::vec3(0.5f, 0.5f, 0.5f),       // STONE
+    glm::vec3(0.45f, 0.3f, 0.15f),     // DIRT
+    glm::vec3(0.2f, 0.6f, 0.2f),       // GRASS
+    glm::vec3(0.9f, 0.85f, 0.6f),      // SAND
+    glm::vec3(0.2f, 0.4f, 0.8f),       // WATER
+};
+
+// Face directions
+enum Face { FACE_NEG_X, FACE_POS_X, FACE_NEG_Y, FACE_POS_Y, FACE_NEG_Z, FACE_POS_Z };
+
+const glm::vec3 FACE_NORMALS[] = {
+    glm::vec3(-1, 0, 0), glm::vec3(1, 0, 0),
+    glm::vec3(0, -1, 0), glm::vec3(0, 1, 0),
+    glm::vec3(0, 0, -1), glm::vec3(0, 0, 1),
+};
+
+// Chunk class
+class Chunk {
+public:
+    glm::ivec3 chunkPos;  // Position in chunk coordinates
+    std::array<uint8_t, CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE> blocks;
+    GLuint VAO = 0, VBO = 0;
+    size_t vertexCount = 0;
+    bool needsRebuild = true;
+    bool isEmpty = true;
+    bool meshUploaded = false;
+
+    Chunk(glm::ivec3 pos) : chunkPos(pos) {
+        blocks.fill(BLOCK_AIR);
+    }
+
+    ~Chunk() {
+        if (VAO) glDeleteVertexArrays(1, &VAO);
+        if (VBO) glDeleteBuffers(1, &VBO);
+    }
+
+    inline int index(int x, int y, int z) const {
+        return x + y * CHUNK_SIZE + z * CHUNK_SIZE * CHUNK_SIZE;
+    }
+
+    uint8_t getBlock(int x, int y, int z) const {
+        if (x < 0 || x >= CHUNK_SIZE || y < 0 || y >= CHUNK_SIZE || z < 0 || z >= CHUNK_SIZE)
+            return BLOCK_AIR;
+        return blocks[index(x, y, z)];
+    }
+
+    void setBlock(int x, int y, int z, uint8_t type) {
+        if (x < 0 || x >= CHUNK_SIZE || y < 0 || y >= CHUNK_SIZE || z < 0 || z >= CHUNK_SIZE)
+            return;
+        blocks[index(x, y, z)] = type;
+        needsRebuild = true;
+        isEmpty = false;
+    }
+
+    glm::vec3 getWorldPos() const {
+        return glm::vec3(chunkPos) * float(CHUNK_SIZE);
+    }
+
+    // Get bounding box for frustum culling
+    void getBoundingBox(glm::vec3& minPos, glm::vec3& maxPos) const {
+        minPos = getWorldPos();
+        maxPos = minPos + glm::vec3(CHUNK_SIZE);
+    }
+};
+
+// Greedy meshing implementation
+class GreedyMesher {
+public:
+    static void mesh(Chunk& chunk, std::vector<Vertex>& vertices) {
+        vertices.clear();
+
+        // For each face direction
+        for (int face = 0; face < 6; face++) {
+            meshFace(chunk, vertices, face);
+        }
+    }
+
+private:
+    static void meshFace(Chunk& chunk, std::vector<Vertex>& vertices, int face) {
+        // Determine axis and direction
+        int axis = face / 2;        // 0=X, 1=Y, 2=Z
+        bool positive = face % 2;   // false=negative, true=positive
+
+        int u = (axis + 1) % 3;
+        int v = (axis + 2) % 3;
+
+        glm::ivec3 dir(0);
+        dir[axis] = positive ? 1 : -1;
+
+        glm::vec3 normal = FACE_NORMALS[face];
+
+        // Mask for greedy meshing
+        std::array<int, CHUNK_SIZE * CHUNK_SIZE> mask;
+
+        // Iterate through slices
+        for (int d = 0; d < CHUNK_SIZE; d++) {
+            // Build mask for this slice
+            for (int j = 0; j < CHUNK_SIZE; j++) {
+                for (int i = 0; i < CHUNK_SIZE; i++) {
+                    glm::ivec3 pos(0);
+                    pos[axis] = d;
+                    pos[u] = i;
+                    pos[v] = j;
+
+                    uint8_t block = chunk.getBlock(pos.x, pos.y, pos.z);
+
+                    // Check neighbor
+                    glm::ivec3 neighborPos = pos + dir;
+                    uint8_t neighbor;
+                    if (neighborPos[axis] < 0 || neighborPos[axis] >= CHUNK_SIZE) {
+                        neighbor = BLOCK_AIR;  // Chunk boundary
+                    } else {
+                        neighbor = chunk.getBlock(neighborPos.x, neighborPos.y, neighborPos.z);
+                    }
+
+                    // Face is visible if current block is solid and neighbor is air
+                    if (block != BLOCK_AIR && neighbor == BLOCK_AIR) {
+                        mask[i + j * CHUNK_SIZE] = block;
+                    } else {
+                        mask[i + j * CHUNK_SIZE] = 0;
+                    }
+                }
+            }
+
+            // Greedy mesh the mask
+            for (int j = 0; j < CHUNK_SIZE; j++) {
+                for (int i = 0; i < CHUNK_SIZE;) {
+                    int blockType = mask[i + j * CHUNK_SIZE];
+                    if (blockType == 0) {
+                        i++;
+                        continue;
+                    }
+
+                    // Find width
+                    int w = 1;
+                    while (i + w < CHUNK_SIZE && mask[i + w + j * CHUNK_SIZE] == blockType) {
+                        w++;
+                    }
+
+                    // Find height
+                    int h = 1;
+                    bool done = false;
+                    while (j + h < CHUNK_SIZE && !done) {
+                        for (int k = 0; k < w; k++) {
+                            if (mask[i + k + (j + h) * CHUNK_SIZE] != blockType) {
+                                done = true;
+                                break;
+                            }
+                        }
+                        if (!done) h++;
+                    }
+
+                    // Create quad
+                    glm::ivec3 pos(0);
+                    pos[axis] = d;
+                    pos[u] = i;
+                    pos[v] = j;
+
+                    glm::vec3 worldPos = chunk.getWorldPos() + glm::vec3(pos);
+
+                    // Offset position for positive faces
+                    if (positive) {
+                        worldPos[axis] += 1.0f;
+                    }
+
+                    // Create quad vertices
+                    glm::vec3 du(0), dv(0);
+                    du[u] = float(w);
+                    dv[v] = float(h);
+
+                    glm::vec3 color = BLOCK_COLORS[blockType];
+
+                    // Apply simple ambient occlusion-like shading based on face
+                    float shade = 1.0f;
+                    if (face == FACE_NEG_Y) shade = 0.5f;
+                    else if (face == FACE_NEG_X || face == FACE_POS_X) shade = 0.7f;
+                    else if (face == FACE_NEG_Z || face == FACE_POS_Z) shade = 0.8f;
+                    color *= shade;
+
+                    // Two triangles for the quad
+                    if (positive) {
+                        vertices.push_back({worldPos, normal, color});
+                        vertices.push_back({worldPos + du, normal, color});
+                        vertices.push_back({worldPos + du + dv, normal, color});
+
+                        vertices.push_back({worldPos, normal, color});
+                        vertices.push_back({worldPos + du + dv, normal, color});
+                        vertices.push_back({worldPos + dv, normal, color});
+                    } else {
+                        vertices.push_back({worldPos, normal, color});
+                        vertices.push_back({worldPos + du + dv, normal, color});
+                        vertices.push_back({worldPos + du, normal, color});
+
+                        vertices.push_back({worldPos, normal, color});
+                        vertices.push_back({worldPos + dv, normal, color});
+                        vertices.push_back({worldPos + du + dv, normal, color});
+                    }
+
+                    // Clear mask
+                    for (int l = 0; l < h; l++) {
+                        for (int k = 0; k < w; k++) {
+                            mask[i + k + (j + l) * CHUNK_SIZE] = 0;
+                        }
+                    }
+
+                    i += w;
+                }
+            }
+        }
+    }
+};
+
+// Chunk manager
+class ChunkManager {
+public:
+    std::unordered_map<int64_t, std::unique_ptr<Chunk>> chunks;
+    std::vector<Vertex> meshBuffer;  // Reusable buffer
+
+    int64_t hashPos(glm::ivec3 pos) const {
+        return (int64_t(pos.x) & 0xFFFFF) |
+               ((int64_t(pos.y) & 0xFFFFF) << 20) |
+               ((int64_t(pos.z) & 0xFFFFF) << 40);
+    }
+
+    Chunk* getChunk(glm::ivec3 pos) {
+        auto it = chunks.find(hashPos(pos));
+        return it != chunks.end() ? it->second.get() : nullptr;
+    }
+
+    Chunk* createChunk(glm::ivec3 pos) {
+        auto chunk = std::make_unique<Chunk>(pos);
+        Chunk* ptr = chunk.get();
+        chunks[hashPos(pos)] = std::move(chunk);
+        return ptr;
+    }
+
+    void generateTerrain(glm::ivec3 chunkPos) {
+        Chunk* chunk = createChunk(chunkPos);
+        glm::vec3 worldBase = chunk->getWorldPos();
+
+        // Simple terrain generation
+        for (int z = 0; z < CHUNK_SIZE; z++) {
+            for (int x = 0; x < CHUNK_SIZE; x++) {
+                float wx = worldBase.x + x;
+                float wz = worldBase.z + z;
+
+                // Simple height function
+                float height = 16.0f +
+                    8.0f * sin(wx * 0.05f) * cos(wz * 0.05f) +
+                    4.0f * sin(wx * 0.1f + 1.0f) * sin(wz * 0.1f);
+
+                for (int y = 0; y < CHUNK_SIZE; y++) {
+                    float wy = worldBase.y + y;
+
+                    if (wy < height - 4) {
+                        chunk->setBlock(x, y, z, BLOCK_STONE);
+                    } else if (wy < height - 1) {
+                        chunk->setBlock(x, y, z, BLOCK_DIRT);
+                    } else if (wy < height) {
+                        chunk->setBlock(x, y, z, BLOCK_GRASS);
+                    }
+                }
+            }
+        }
+    }
+
+    void rebuildChunkMesh(Chunk* chunk) {
+        if (!chunk->needsRebuild) return;
+
+        GreedyMesher::mesh(*chunk, meshBuffer);
+        chunk->vertexCount = meshBuffer.size();
+
+        if (chunk->vertexCount == 0) {
+            chunk->isEmpty = true;
+            chunk->needsRebuild = false;
+            return;
+        }
+
+        chunk->isEmpty = false;
+
+        // Create/update GPU buffers
+        if (!chunk->VAO) {
+            glGenVertexArrays(1, &chunk->VAO);
+            glGenBuffers(1, &chunk->VBO);
+        }
+
+        glBindVertexArray(chunk->VAO);
+        glBindBuffer(GL_ARRAY_BUFFER, chunk->VBO);
+        glBufferData(GL_ARRAY_BUFFER,
+            meshBuffer.size() * sizeof(Vertex),
+            meshBuffer.data(), GL_STATIC_DRAW);
+
+        // Position
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex),
+            (void*)offsetof(Vertex, position));
+        glEnableVertexAttribArray(0);
+
+        // Normal
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex),
+            (void*)offsetof(Vertex, normal));
+        glEnableVertexAttribArray(1);
+
+        // Color
+        glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex),
+            (void*)offsetof(Vertex, color));
+        glEnableVertexAttribArray(2);
+
+        glBindVertexArray(0);
+
+        chunk->needsRebuild = false;
+        chunk->meshUploaded = true;
+    }
+};
+
+// Frustum culling
+class Frustum {
+public:
+    glm::vec4 planes[6];
+
+    void extract(const glm::mat4& vp) {
+        // Left
+        planes[0] = glm::vec4(
+            vp[0][3] + vp[0][0], vp[1][3] + vp[1][0],
+            vp[2][3] + vp[2][0], vp[3][3] + vp[3][0]);
+        // Right
+        planes[1] = glm::vec4(
+            vp[0][3] - vp[0][0], vp[1][3] - vp[1][0],
+            vp[2][3] - vp[2][0], vp[3][3] - vp[3][0]);
+        // Bottom
+        planes[2] = glm::vec4(
+            vp[0][3] + vp[0][1], vp[1][3] + vp[1][1],
+            vp[2][3] + vp[2][1], vp[3][3] + vp[3][1]);
+        // Top
+        planes[3] = glm::vec4(
+            vp[0][3] - vp[0][1], vp[1][3] - vp[1][1],
+            vp[2][3] - vp[2][1], vp[3][3] - vp[3][1]);
+        // Near
+        planes[4] = glm::vec4(
+            vp[0][3] + vp[0][2], vp[1][3] + vp[1][2],
+            vp[2][3] + vp[2][2], vp[3][3] + vp[3][2]);
+        // Far
+        planes[5] = glm::vec4(
+            vp[0][3] - vp[0][2], vp[1][3] - vp[1][2],
+            vp[2][3] - vp[2][2], vp[3][3] - vp[3][2]);
+
+        for (int i = 0; i < 6; i++) {
+            float len = glm::length(glm::vec3(planes[i]));
+            planes[i] /= len;
+        }
+    }
+
+    bool isBoxVisible(const glm::vec3& minPos, const glm::vec3& maxPos) const {
+        for (int i = 0; i < 6; i++) {
+            glm::vec3 p(
+                planes[i].x > 0 ? maxPos.x : minPos.x,
+                planes[i].y > 0 ? maxPos.y : minPos.y,
+                planes[i].z > 0 ? maxPos.z : minPos.z
+            );
+            if (glm::dot(glm::vec3(planes[i]), p) + planes[i].w < 0) {
+                return false;
+            }
+        }
+        return true;
+    }
 };
 
 void framebuffer_size_callback(GLFWwindow* window, int width, int height) {
@@ -114,9 +484,7 @@ void mouse_callback(GLFWwindow* window, double x_in, double y_in) {
     g_manager.lastY = y;
 
     g_manager.camera.yaw += delta_x;
-    g_manager.camera.pitch += delta_y;
-
-    g_manager.camera.pitch = glm::clamp(g_manager.camera.pitch, -89.0f, 89.0f);
+    g_manager.camera.pitch = glm::clamp(g_manager.camera.pitch + delta_y, -89.0f, 89.0f);
 
     glm::vec3 front;
     front.x = cos(glm::radians(g_manager.camera.yaw)) * cos(glm::radians(g_manager.camera.pitch));
@@ -146,67 +514,19 @@ void processInput(GLFWwindow* window) {
         if (glfwGetInputMode(window, GLFW_CURSOR) != GLFW_CURSOR_DISABLED)
             glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
-        float cameraSpeed = g_manager.camera.speed * g_manager.delta_time;
+        float speed = g_manager.camera.speed * g_manager.delta_time;
         if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
-            g_manager.camera.pos += cameraSpeed * g_manager.camera.front;
+            g_manager.camera.pos += speed * g_manager.camera.front;
         if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
-            g_manager.camera.pos -= cameraSpeed * g_manager.camera.front;
+            g_manager.camera.pos -= speed * g_manager.camera.front;
         if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
-            g_manager.camera.pos -= glm::normalize(glm::cross(g_manager.camera.front, g_manager.camera.up)) * cameraSpeed;
+            g_manager.camera.pos -= glm::normalize(glm::cross(g_manager.camera.front, g_manager.camera.up)) * speed;
         if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
-            g_manager.camera.pos += glm::normalize(glm::cross(g_manager.camera.front, g_manager.camera.up)) * cameraSpeed;
-    }
-}
-
-// Extract frustum planes from view-projection matrix
-void extractFrustumPlanes(const glm::mat4& vp, glm::vec4 planes[6]) {
-    // Left
-    planes[0] = glm::vec4(
-        vp[0][3] + vp[0][0],
-        vp[1][3] + vp[1][0],
-        vp[2][3] + vp[2][0],
-        vp[3][3] + vp[3][0]
-    );
-    // Right
-    planes[1] = glm::vec4(
-        vp[0][3] - vp[0][0],
-        vp[1][3] - vp[1][0],
-        vp[2][3] - vp[2][0],
-        vp[3][3] - vp[3][0]
-    );
-    // Bottom
-    planes[2] = glm::vec4(
-        vp[0][3] + vp[0][1],
-        vp[1][3] + vp[1][1],
-        vp[2][3] + vp[2][1],
-        vp[3][3] + vp[3][1]
-    );
-    // Top
-    planes[3] = glm::vec4(
-        vp[0][3] - vp[0][1],
-        vp[1][3] - vp[1][1],
-        vp[2][3] - vp[2][1],
-        vp[3][3] - vp[3][1]
-    );
-    // Near
-    planes[4] = glm::vec4(
-        vp[0][3] + vp[0][2],
-        vp[1][3] + vp[1][2],
-        vp[2][3] + vp[2][2],
-        vp[3][3] + vp[3][2]
-    );
-    // Far
-    planes[5] = glm::vec4(
-        vp[0][3] - vp[0][2],
-        vp[1][3] - vp[1][2],
-        vp[2][3] - vp[2][2],
-        vp[3][3] - vp[3][2]
-    );
-
-    // Normalize planes
-    for (int i = 0; i < 6; i++) {
-        float length = glm::length(glm::vec3(planes[i]));
-        planes[i] /= length;
+            g_manager.camera.pos += glm::normalize(glm::cross(g_manager.camera.front, g_manager.camera.up)) * speed;
+        if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS)
+            g_manager.camera.pos += speed * g_manager.camera.up;
+        if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
+            g_manager.camera.pos -= speed * g_manager.camera.up;
     }
 }
 
@@ -235,7 +555,8 @@ int main() {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
-    GLFWwindow* window = glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT, "C++23 OpenGL - GPU Frustum Culling", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT,
+        "Chunked Voxels - Greedy Meshing + Frustum Culling", nullptr, nullptr);
     if (!window) {
         std::cerr << "Failed to create GLFW window\n";
         glfwTerminate();
@@ -256,19 +577,10 @@ int main() {
     }
 
     glEnable(GL_DEPTH_TEST);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
 
-    // Generate cube positions
-    std::vector<glm::vec4> cube_positions;
-    for (int y = -100; y < 100; y += 2) {
-        for (int x = -100; x < 100; x += 2) {
-            for (int z = -100; z < 100; z += 2) {
-                cube_positions.push_back(glm::vec4(x, y, z, 1.0f));
-            }
-        }
-    }
-    GLuint totalCubes = static_cast<GLuint>(cube_positions.size());
-
-    // Compile render shaders
+    // Compile shaders
     GLuint vertexShader = compileShader(GL_VERTEX_SHADER, vertexShaderSource);
     GLuint fragmentShader = compileShader(GL_FRAGMENT_SHADER, fragmentShaderSource);
 
@@ -279,60 +591,22 @@ int main() {
     glDeleteShader(vertexShader);
     glDeleteShader(fragmentShader);
 
-    // Compile compute shader
-    GLuint computeShader = compileShader(GL_COMPUTE_SHADER, computeShaderSource);
-    GLuint computeProgram = glCreateProgram();
-    glAttachShader(computeProgram, computeShader);
-    glLinkProgram(computeProgram);
-    glDeleteShader(computeShader);
+    // Generate chunks
+    ChunkManager chunkManager;
+    const int WORLD_SIZE = 4;  // 4x4x4 chunks = 128x128x128 blocks
 
-    // Setup VAO/VBO for cube geometry
-    GLuint VAO, VBO;
-    glGenVertexArrays(1, &VAO);
-    glGenBuffers(1, &VBO);
+    for (int z = 0; z < WORLD_SIZE; z++) {
+        for (int y = 0; y < WORLD_SIZE; y++) {
+            for (int x = 0; x < WORLD_SIZE; x++) {
+                chunkManager.generateTerrain(glm::ivec3(x, y, z));
+            }
+        }
+    }
 
-    glBindVertexArray(VAO);
-    glBindBuffer(GL_ARRAY_BUFFER, VBO);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(g_cube), g_cube, GL_STATIC_DRAW);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, (void*)0);
-    glEnableVertexAttribArray(0);
-
-    // SSBO 0: Input positions (all cubes)
-    GLuint inputSSBO;
-    glGenBuffers(1, &inputSSBO);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, inputSSBO);
-    glBufferData(GL_SHADER_STORAGE_BUFFER,
-        cube_positions.size() * sizeof(glm::vec4),
-        cube_positions.data(), GL_STATIC_DRAW);
-
-    // SSBO 1: Output positions (visible cubes) - also used as instance VBO
-    GLuint outputSSBO;
-    glGenBuffers(1, &outputSSBO);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, outputSSBO);
-    glBufferData(GL_SHADER_STORAGE_BUFFER,
-        cube_positions.size() * sizeof(glm::vec4),
-        nullptr, GL_DYNAMIC_DRAW);
-
-    // Bind output SSBO as instance attribute
-    glBindBuffer(GL_ARRAY_BUFFER, outputSSBO);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec4), (void*)0);
-    glEnableVertexAttribArray(1);
-    glVertexAttribDivisor(1, 1);
-
-    // SSBO 2: Indirect draw command
-    GLuint indirectBuffer;
-    glGenBuffers(1, &indirectBuffer);
-    glBindBuffer(GL_DRAW_INDIRECT_BUFFER, indirectBuffer);
-    DrawArraysIndirectCommand cmd = { 36, 0, 0, 0 };
-    glBufferData(GL_DRAW_INDIRECT_BUFFER, sizeof(cmd), &cmd, GL_DYNAMIC_DRAW);
-
-    // SSBO 3: Atomic counter
-    GLuint atomicBuffer;
-    glGenBuffers(1, &atomicBuffer);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, atomicBuffer);
-    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(GLuint), nullptr, GL_DYNAMIC_DRAW);
-
-    glBindVertexArray(0);
+    // Build all meshes
+    for (auto& [hash, chunk] : chunkManager.chunks) {
+        chunkManager.rebuildChunkMesh(chunk.get());
+    }
 
     // Setup ImGui
     IMGUI_CHECKVERSION();
@@ -341,9 +615,12 @@ int main() {
     ImGui::StyleColorsDark();
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 460");
-    ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
 
-    GLuint visibleCount = 0;
+    Frustum frustum;
+    uint32_t totalChunks = 0;
+    uint32_t visibleChunks = 0;
+    uint32_t totalVertices = 0;
+    uint32_t visibleVertices = 0;
 
     while (!glfwWindowShouldClose(window)) {
         float currentFrame = static_cast<float>(glfwGetTime());
@@ -352,9 +629,9 @@ int main() {
 
         processInput(window);
 
-        // Build view-projection matrix and extract frustum planes
+        // Build matrices
         glm::mat4 projection = glm::perspective(
-            glm::radians(45.0f),
+            glm::radians(60.0f),
             (float)SCR_WIDTH / (float)SCR_HEIGHT,
             0.1f,
             g_manager.camera.render_distance
@@ -366,38 +643,40 @@ int main() {
         );
         glm::mat4 vp = projection * view;
 
-        glm::vec4 frustumPlanes[6];
-        extractFrustumPlanes(vp, frustumPlanes);
+        frustum.extract(vp);
 
-        // Reset atomic counter
-        GLuint zero = 0;
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, atomicBuffer);
-        glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(GLuint), &zero);
+        // Clear
+        glClearColor(0.4f, 0.6f, 0.9f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        // Dispatch compute shader for frustum culling
-        glUseProgram(computeProgram);
-        glUniform4fv(glGetUniformLocation(computeProgram, "frustumPlanes"), 6, glm::value_ptr(frustumPlanes[0]));
-        glUniform1ui(glGetUniformLocation(computeProgram, "totalCubes"), totalCubes);
+        glUseProgram(shaderProgram);
+        glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "view"), 1, GL_FALSE, glm::value_ptr(view));
+        glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
+        glUniform3fv(glGetUniformLocation(shaderProgram, "viewPos"), 1, glm::value_ptr(g_manager.camera.pos));
 
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, inputSSBO);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, outputSSBO);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, indirectBuffer);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, atomicBuffer);
+        // Render chunks with frustum culling
+        totalChunks = 0;
+        visibleChunks = 0;
+        totalVertices = 0;
+        visibleVertices = 0;
 
-        GLuint numGroups = (totalCubes + 255) / 256;
-        glDispatchCompute(numGroups, 1, 1);
+        for (auto& [hash, chunk] : chunkManager.chunks) {
+            if (chunk->isEmpty || !chunk->meshUploaded) continue;
 
-        // Memory barrier to ensure compute shader writes are visible
-        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_COMMAND_BARRIER_BIT);
+            totalChunks++;
+            totalVertices += chunk->vertexCount;
 
-        // Copy visible count to indirect buffer's instanceCount
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, atomicBuffer);
-        glBindBuffer(GL_COPY_WRITE_BUFFER, indirectBuffer);
-        glCopyBufferSubData(GL_SHADER_STORAGE_BUFFER, GL_COPY_WRITE_BUFFER,
-            0, offsetof(DrawArraysIndirectCommand, instanceCount), sizeof(GLuint));
+            glm::vec3 minPos, maxPos;
+            chunk->getBoundingBox(minPos, maxPos);
 
-        // Read back visible count for debug display
-        glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(GLuint), &visibleCount);
+            if (!frustum.isBoxVisible(minPos, maxPos)) continue;
+
+            visibleChunks++;
+            visibleVertices += chunk->vertexCount;
+
+            glBindVertexArray(chunk->VAO);
+            glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(chunk->vertexCount));
+        }
 
         // ImGui
         ImGui_ImplOpenGL3_NewFrame();
@@ -408,43 +687,34 @@ int main() {
             ImGui::GetIO().ConfigFlags &= ~ImGuiConfigFlags_NoMouse;
         } else {
             ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouse;
-            ImGui::SetWindowFocus(NULL);
         }
 
         ImGui::Begin("Debug Menu");
         if (g_manager.ui_mode) {
-            ImGui::TextColored(ImVec4(0, 1, 0, 1), "MENU MODE ACTIVE (TAB to close)");
+            ImGui::TextColored(ImVec4(0, 1, 0, 1), "MENU MODE (TAB to close)");
         } else {
-            ImGui::Text("GAME MODE ACTIVE (TAB for menu)");
+            ImGui::Text("GAME MODE (TAB for menu)");
         }
         ImGui::Separator();
         ImGui::Text("FPS: %.1f", io.Framerate);
         ImGui::Text("Frame Time: %.3f ms", 1000.0f / io.Framerate);
         ImGui::Separator();
-        ImGui::Text("Total Cubes: %u", totalCubes);
-        ImGui::Text("Visible Cubes: %u", visibleCount);
-        ImGui::Text("Culled: %.1f%%", 100.0f * (1.0f - (float)visibleCount / totalCubes));
+        ImGui::Text("Chunk Size: %dx%dx%d", CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE);
+        ImGui::Text("Total Chunks: %u", totalChunks);
+        ImGui::Text("Visible Chunks: %u", visibleChunks);
+        ImGui::Text("Chunks Culled: %.1f%%",
+            totalChunks > 0 ? 100.0f * (1.0f - (float)visibleChunks / totalChunks) : 0.0f);
         ImGui::Separator();
-        ImGui::Text("Camera Pos: %.2f, %.2f, %.2f",
+        ImGui::Text("Total Vertices: %u", totalVertices);
+        ImGui::Text("Visible Vertices: %u", visibleVertices);
+        ImGui::Text("Total Triangles: %u", totalVertices / 3);
+        ImGui::Text("Visible Triangles: %u", visibleVertices / 3);
+        ImGui::Separator();
+        ImGui::Text("Camera: %.1f, %.1f, %.1f",
             g_manager.camera.pos.x, g_manager.camera.pos.y, g_manager.camera.pos.z);
-        ImGui::SliderFloat("Camera Speed", &g_manager.camera.speed, 0.5f, 100.0f);
-        ImGui::SliderFloat("Render Distance", &g_manager.camera.render_distance, 50.0f, 500.0f);
+        ImGui::SliderFloat("Speed", &g_manager.camera.speed, 1.0f, 200.0f);
+        ImGui::SliderFloat("Render Dist", &g_manager.camera.render_distance, 50.0f, 1000.0f);
         ImGui::End();
-
-        // Render
-        glClearColor(0.1f, 0.1f, 0.2f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-        glUseProgram(shaderProgram);
-
-        glm::mat4 model = glm::mat4(1.0f);
-        glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
-        glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "view"), 1, GL_FALSE, glm::value_ptr(view));
-        glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
-
-        glBindVertexArray(VAO);
-        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, indirectBuffer);
-        glDrawArraysIndirect(GL_TRIANGLES, nullptr);
 
         ImGui::Render();
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
@@ -458,14 +728,7 @@ int main() {
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
 
-    glDeleteVertexArrays(1, &VAO);
-    glDeleteBuffers(1, &VBO);
-    glDeleteBuffers(1, &inputSSBO);
-    glDeleteBuffers(1, &outputSSBO);
-    glDeleteBuffers(1, &indirectBuffer);
-    glDeleteBuffers(1, &atomicBuffer);
     glDeleteProgram(shaderProgram);
-    glDeleteProgram(computeProgram);
 
     glfwDestroyWindow(window);
     glfwTerminate();
