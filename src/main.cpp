@@ -32,6 +32,7 @@ typedef struct {
     float pitch;
     float sensitivity;
     float speed;
+    float render_distance;
 } Camera;
 
 typedef struct {
@@ -39,6 +40,7 @@ typedef struct {
     float lastY;
     float delta_time;
     float last_frame;
+    bool ui_mode;
     Camera camera;
 } Manager;
 
@@ -53,6 +55,7 @@ Manager g_manager = {
     .lastY = SCR_HEIGHT / 2.0,
     .delta_time = 0.0,
     .last_frame = 0.0,
+    .ui_mode = false,
     .camera = {
         .pos   = glm::vec3(0.0f, 0.0f, 3.0f),
         .front = glm::vec3(0.0f, 0.0f, -1.0f),
@@ -60,8 +63,9 @@ Manager g_manager = {
         .yaw   = -90.0f,
         .pitch = 0.0f,
         .sensitivity = 0.1f,
-        .speed= 2.5f
-    }
+        .speed= 30.0f,
+        .render_distance = 300.0f,
+    },
 };
 
 
@@ -111,6 +115,7 @@ float g_cube[] = {
 
 
 
+
 void framebuffer_size_callback(GLFWwindow* window, int width, int height)
 {
     glViewport(0, 0, width, height);
@@ -121,6 +126,7 @@ void mouse_callback(GLFWwindow* window, double x_in, double y_in){
    float x = static_cast<float>(x_in);
    float y = static_cast<float>(y_in);
 
+   if (g_manager.ui_mode) return;
    if (first_mouse){
        g_manager.lastX = x;
        g_manager.lastY = y;
@@ -151,15 +157,42 @@ void processInput(GLFWwindow* window) {
     if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
         glfwSetWindowShouldClose(window, true);
 
-    float cameraSpeed = static_cast<float>(g_manager.camera.speed * g_manager.delta_time);
-    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
-        g_manager.camera.pos += cameraSpeed * g_manager.camera.front;
-    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
-        g_manager.camera.pos -= cameraSpeed * g_manager.camera.front;
-    if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
-        g_manager.camera.pos -= glm::normalize(glm::cross(g_manager.camera.front, g_manager.camera.up)) * cameraSpeed;
-    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
-        g_manager.camera.pos += glm::normalize(glm::cross(g_manager.camera.front, g_manager.camera.up)) * cameraSpeed;
+    // Toggle UI mode with TAB
+    static bool tab_pressed = false;
+    if (glfwGetKey(window, GLFW_KEY_TAB) == GLFW_PRESS) {
+        if (!tab_pressed) {
+            g_manager.ui_mode = !g_manager.ui_mode;
+
+            if (g_manager.ui_mode) {
+                glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+            } else {
+                glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+                first_mouse = true; // Prevents camera snap
+            }
+            tab_pressed = true;
+        }
+    } else {
+        tab_pressed = false;
+    }
+
+    // Only move camera if NOT in UI mode
+    if (!g_manager.ui_mode) {
+        // FORCE cursor disabled while in game mode (safety check)
+        // Some systems/drivers need this if focus is lost and regained
+        if (glfwGetInputMode(window, GLFW_CURSOR) != GLFW_CURSOR_DISABLED) {
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+        }
+
+        float cameraSpeed = static_cast<float>(g_manager.camera.speed * g_manager.delta_time);
+        if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
+            g_manager.camera.pos += cameraSpeed * g_manager.camera.front;
+        if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
+            g_manager.camera.pos -= cameraSpeed * g_manager.camera.front;
+        if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
+            g_manager.camera.pos -= glm::normalize(glm::cross(g_manager.camera.front, g_manager.camera.up)) * cameraSpeed;
+        if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
+            g_manager.camera.pos += glm::normalize(glm::cross(g_manager.camera.front, g_manager.camera.up)) * cameraSpeed;
+    }
 }
 
 
@@ -185,6 +218,8 @@ int main()
     }
 
     glfwMakeContextCurrent(window);
+    // VSYNC
+    glfwSwapInterval(0);
     glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
     glfwSetCursorPosCallback(window, mouse_callback);
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
@@ -201,9 +236,9 @@ int main()
     // Setup our offset buffers thing
     std::vector<glm::vec3> cube_positions;
     float offset = 2.0f;
-    for (int y = -40; y < 40; y += 2) {
-        for (int x = -10; x < 10; x += 2) {
-            for (int z = -40; z < 40; z += 2) {
+    for (int y = -100; y < 100; y += 2) {
+        for (int x = -100; x < 100; x += 2) {
+            for (int z = -100; z < 100; z += 2) {
                 cube_positions.push_back(glm::vec3(x, y, z));
             }
         }
@@ -266,7 +301,7 @@ int main()
     ImGui::StyleColorsDark();
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 460");
-
+    ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
 
     while (!glfwWindowShouldClose(window)) {
         float currentFrame = static_cast<float>(glfwGetTime());
@@ -279,12 +314,30 @@ int main()
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
+        if (!g_manager.ui_mode) {
+            // Tell ImGui to ignore the mouse and keyboard entirely
+            ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouse;
+
+            // Clear keyboard focus so nothing is highlighted
+            ImGui::SetWindowFocus(NULL);
+        } else {
+            // Re-enable mouse when UI is active
+            ImGui::GetIO().ConfigFlags &= ~ImGuiConfigFlags_NoMouse;
+        }
 
         // Create a simple debug window
         ImGui::Begin("Debug Menu");
+        if (g_manager.ui_mode) {
+            ImGui::TextColored(ImVec4(0, 1, 0, 1), "MENU MODE ACTIVE (TAB to close)");
+        } else {
+            ImGui::Text("GAME MODE ACTIVE (TAB for menu)");
+        }
+        ImGui::Separator();
+        ImGui::Text("FPS: %.1f", io.Framerate);
         ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / io.Framerate, io.Framerate);
+        ImGui::Text("Cube Count: %zu ", cube_positions.size());
         ImGui::Text("Camera Pos: %.2f, %.2f, %.2f", g_manager.camera.pos.x, g_manager.camera.pos.y, g_manager.camera.pos.z);
-        ImGui::SliderFloat("Camera Speed", &g_manager.camera.speed, 0.5f, 10.0f);
+        ImGui::SliderFloat("Camera Speed", &g_manager.camera.speed, 0.5f, 100.0f);
         ImGui::End();
 
         glClearColor(0.1f, 0.1f, 0.2f, 1.0f);
@@ -293,7 +346,7 @@ int main()
         glUseProgram(shaderProgram);
 
         // Transformation matrices
-        glm::mat4 projection = glm::perspective(glm::radians(45.0f), (float)SCR_WIDTH / (float)SCR_HEIGHT, 0.1f, 100.0f);
+        glm::mat4 projection = glm::perspective(glm::radians(45.0f), (float)SCR_WIDTH / (float)SCR_HEIGHT, 0.1f, g_manager.camera.render_distance);
         glm::mat4 view = glm::lookAt(g_manager.camera.pos, g_manager.camera.pos + g_manager.camera.front, g_manager.camera.up);
         glm::mat4 model = glm::mat4(1.0f);
         // model = glm::rotate(model, (float)glfwGetTime(), glm::vec3(0.5f, 1.0f, 0.0f));
