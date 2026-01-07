@@ -12,6 +12,8 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
+#define GLM_ENABLE_EXPERIMENTAL
+#include <glm/gtx/norm.hpp>
 
 #include <imgui/imgui.h>
 #include <imgui/backends/imgui_impl_glfw.h>
@@ -712,170 +714,166 @@ private:
         bool transparent;
     };
 
-    static void meshFace(Chunk& chunk,
-                         std::vector<ChunkVertex>& opaqueVerts,
-                         std::vector<ChunkVertex>& transparentVerts,
-                         int face) {
-        int axis = face / 2;
-        bool positive = face % 2;
-        int u = (axis + 1) % 3;
-        int v = (axis + 2) % 3;
+static void meshFace(Chunk& chunk,
+                     std::vector<ChunkVertex>& opaqueVerts,
+                     std::vector<ChunkVertex>& transparentVerts,
+                     int face) {
+    int axis = face / 2;    // 0:X, 1:Y, 2:Z
+    bool positive = face % 2;
+    int u = (axis + 1) % 3;
+    int v = (axis + 2) % 3;
 
-        glm::ivec3 dir(0);
-        dir[axis] = positive ? 1 : -1;
-        glm::vec3 normal = FACE_NORMALS[face];
+    glm::ivec3 dir(0);
+    dir[axis] = positive ? 1 : -1;
+    glm::vec3 normal = FACE_NORMALS[face];
 
-        std::array<FaceData, CHUNK_SIZE * CHUNK_SIZE> mask;
+    std::array<FaceData, CHUNK_SIZE * CHUNK_SIZE> mask;
 
-        for (int d = 0; d < CHUNK_SIZE; d++) {
-            // Build mask
-            for (int j = 0; j < CHUNK_SIZE; j++) {
-                for (int i = 0; i < CHUNK_SIZE; i++) {
-                    glm::ivec3 pos(0);
-                    pos[axis] = d;
-                    pos[u] = i;
-                    pos[v] = j;
+    for (int d = 0; d < CHUNK_SIZE; d++) {
+        // 1. Build the mask for this slice
+        for (int j = 0; j < CHUNK_SIZE; j++) {
+            for (int i = 0; i < CHUNK_SIZE; i++) {
+                glm::ivec3 pos(0);
+                pos[axis] = d;
+                pos[u] = i;
+                pos[v] = j;
 
-                    BlockData blockData = chunk.getBlock(pos.x, pos.y, pos.z);
-                    const BlockInfo& blockInfo = BLOCK_INFO[blockData.type];
+                BlockData blockData = chunk.getBlock(pos.x, pos.y, pos.z);
+                const BlockInfo& blockInfo = BLOCK_INFO[blockData.type];
 
-                    // Skip air and micro blocks (handled separately)
-                    if (blockInfo.category != CATEGORY_SOLID) {
-                        mask[i + j * CHUNK_SIZE] = {0, 0, -1, 0, false};
-                        continue;
-                    }
-
-                    glm::ivec3 neighborPos = pos + dir;
-                    BlockData neighbor;
-                    if (neighborPos[axis] < 0 || neighborPos[axis] >= CHUNK_SIZE) {
-                        neighbor = {BLOCK_AIR, ROT_Y_UP_Z_FWD, 0};
-                    } else {
-                        neighbor = chunk.getBlock(
-                            neighborPos.x, neighborPos.y, neighborPos.z);
-                    }
-
-                    const BlockInfo& neighborInfo = BLOCK_INFO[neighbor.type];
-                    bool neighborSolid = neighborInfo.category == CATEGORY_SOLID &&
-                                         !neighborInfo.textureInfo->transparent;
-
-                    // Face visible if neighbor is not opaque solid
-                    if (!neighborSolid) {
-                        // Get texture info with rotation
-                        int originalFace = ROTATION_FACE_MAP[blockData.rotation][face];
-                        uint8_t uvRot = ROTATION_UV_ROT[blockData.rotation][face];
-
-                        TextureFace texFace =
-                            blockInfo.textureInfo->faces[originalFace];
-                        uvRot = (uvRot + texFace.uvRotation) % 4;
-
-                        mask[i + j * CHUNK_SIZE] = {
-                            blockData.type,
-                            blockData.rotation,
-                            static_cast<int>(texFace.textureId),
-                            uvRot,
-                            blockInfo.textureInfo->transparent
-                        };
-                    } else {
-                        mask[i + j * CHUNK_SIZE] = {0, 0, -1, 0, false};
-                    }
+                // Skip non-solid categories
+                if (blockInfo.category != CATEGORY_SOLID) {
+                    mask[i + j * CHUNK_SIZE] = {0, 0, -1, 0, false};
+                    continue;
                 }
-            }
 
-            // Greedy mesh
-            for (int j = 0; j < CHUNK_SIZE; j++) {
-                for (int i = 0; i < CHUNK_SIZE;) {
-                    FaceData& faceData = mask[i + j * CHUNK_SIZE];
-                    if (faceData.textureLayer < 0) {
-                        i++;
-                        continue;
+                // Neighbor logic
+                glm::ivec3 neighborPos = pos + dir;
+                BlockData neighbor = chunk.getBlock(neighborPos.x, neighborPos.y, neighborPos.z);
+                const BlockInfo& neighborInfo = BLOCK_INFO[neighbor.type];
+
+                bool isTransparent = blockInfo.textureInfo->transparent;
+                bool isVisible = false;
+
+                if (neighbor.type == BLOCK_AIR) {
+                    isVisible = true;
+                } else if (BLOCK_INFO[neighbor.type].category != CATEGORY_SOLID) {
+                    isVisible = true; // Show faces against models/microblocks
+                } else {
+                    bool neighborTransparent = neighborInfo.textureInfo->transparent;
+
+                    if (!isTransparent && neighborTransparent) {
+                        // Opaque block next to glass -> Opaque face is visible
+                        isVisible = true;
+                    } else if (isTransparent && !neighborTransparent) {
+                        // Glass block next to opaque -> Glass face is visible
+                        isVisible = true;
+                    } else if (isTransparent && neighborTransparent) {
+                        // Glass next to Glass -> Only show if they are DIFFERENT types
+                        // This prevents internal flickering/overlap
+                        isVisible = (blockData.type != neighbor.type);
                     }
+                    // Opaque next to Opaque -> hidden (isVisible = false)
+                }
 
-                    // Find width
-                    int w = 1;
-                    while (i + w < CHUNK_SIZE) {
-                        FaceData& next = mask[i + w + j * CHUNK_SIZE];
-                        if (next.textureLayer != faceData.textureLayer ||
-                            next.uvRotation != faceData.uvRotation ||
-                            next.transparent != faceData.transparent) {
-                            break;
-                        }
-                        w++;
-                    }
+                if (isVisible) {
+                    int originalFace = ROTATION_FACE_MAP[blockData.rotation][face];
+                    uint8_t uvRot = (ROTATION_UV_ROT[blockData.rotation][face] +
+                                     blockInfo.textureInfo->faces[originalFace].uvRotation) % 4;
 
-                    // Find height
-                    int h = 1;
-                    bool done = false;
-                    while (j + h < CHUNK_SIZE && !done) {
-                        for (int k = 0; k < w; k++) {
-                            FaceData& check = mask[i + k + (j + h) * CHUNK_SIZE];
-                            if (check.textureLayer != faceData.textureLayer ||
-                                check.uvRotation != faceData.uvRotation ||
-                                check.transparent != faceData.transparent) {
-                                done = true;
-                                break;
-                            }
-                        }
-                        if (!done) h++;
-                    }
-
-                    // Create quad
-                    glm::ivec3 pos(0);
-                    pos[axis] = d;
-                    pos[u] = i;
-                    pos[v] = j;
-
-                    glm::vec3 worldPos = chunk.getWorldPos() + glm::vec3(pos);
-                    if (positive) worldPos[axis] += 1.0f;
-
-                    glm::vec3 du(0), dv(0);
-                    du[u] = float(w);
-                    dv[v] = float(h);
-
-                    // Face shading
-                    float shade = 1.0f;
-                    if (face == FACE_NEG_Y) shade = 0.5f;
-                    else if (face == FACE_NEG_X || face == FACE_POS_X) shade = 0.7f;
-                    else if (face == FACE_NEG_Z || face == FACE_POS_Z) shade = 0.8f;
-
-                    glm::vec3 color = BLOCK_INFO[faceData.blockType].color * shade;
-                    float texLayer = static_cast<float>(faceData.textureLayer);
-
-                    // UV coordinates (tiled based on quad size)
-                    glm::vec2 uv00 = rotateUV(glm::vec2(0, 0), faceData.uvRotation);
-                    glm::vec2 uv10 = rotateUV(glm::vec2(w, 0), faceData.uvRotation);
-                    glm::vec2 uv11 = rotateUV(glm::vec2(w, h), faceData.uvRotation);
-                    glm::vec2 uv01 = rotateUV(glm::vec2(0, h), faceData.uvRotation);
-
-                    auto& verts = faceData.transparent ? transparentVerts : opaqueVerts;
-
-                    if (positive) {
-                        verts.push_back({worldPos, normal, color, uv00, texLayer, 1.0f});
-                        verts.push_back({worldPos + du, normal, color, uv10, texLayer, 1.0f});
-                        verts.push_back({worldPos + du + dv, normal, color, uv11, texLayer, 1.0f});
-                        verts.push_back({worldPos, normal, color, uv00, texLayer, 1.0f});
-                        verts.push_back({worldPos + du + dv, normal, color, uv11, texLayer, 1.0f});
-                        verts.push_back({worldPos + dv, normal, color, uv01, texLayer, 1.0f});
-                    } else {
-                        verts.push_back({worldPos, normal, color, uv00, texLayer, 1.0f});
-                        verts.push_back({worldPos + du + dv, normal, color, uv11, texLayer, 1.0f});
-                        verts.push_back({worldPos + du, normal, color, uv10, texLayer, 1.0f});
-                        verts.push_back({worldPos, normal, color, uv00, texLayer, 1.0f});
-                        verts.push_back({worldPos + dv, normal, color, uv01, texLayer, 1.0f});
-                        verts.push_back({worldPos + du + dv, normal, color, uv11, texLayer, 1.0f});
-                    }
-
-                    // Clear mask
-                    for (int l = 0; l < h; l++) {
-                        for (int k = 0; k < w; k++) {
-                            mask[i + k + (j + l) * CHUNK_SIZE].textureLayer = -1;
-                        }
-                    }
-
-                    i += w;
+                    mask[i + j * CHUNK_SIZE] = {
+                        blockData.type,
+                        blockData.rotation,
+                        (int)blockInfo.textureInfo->faces[originalFace].textureId,
+                        uvRot,
+                        isTransparent
+                    };
+                } else {
+                    mask[i + j * CHUNK_SIZE] = {0, 0, -1, 0, false};
                 }
             }
         }
+
+        // 2. Greedy Mesh the mask
+        for (int j = 0; j < CHUNK_SIZE; j++) {
+            for (int i = 0; i < CHUNK_SIZE; ) {
+                FaceData& curr = mask[i + j * CHUNK_SIZE];
+                if (curr.textureLayer < 0) { i++; continue; }
+
+                // Find width
+                int w = 1;
+                while (i + w < CHUNK_SIZE) {
+                    FaceData& next = mask[i + w + j * CHUNK_SIZE];
+                    if (next.blockType != curr.blockType || next.textureLayer != curr.textureLayer ||
+                        next.uvRotation != curr.uvRotation) break;
+                    w++;
+                }
+
+                // Find height
+                int h = 1;
+                bool done = false;
+                while (j + h < CHUNK_SIZE) {
+                    for (int k = 0; k < w; k++) {
+                        FaceData& nextRow = mask[i + k + (j + h) * CHUNK_SIZE];
+                        if (nextRow.blockType != curr.blockType || nextRow.textureLayer != curr.textureLayer ||
+                            nextRow.uvRotation != curr.uvRotation) {
+                            done = true; break;
+                        }
+                    }
+                    if (done) break;
+                    h++;
+                }
+
+                // 3. Add to vertex buffer
+                glm::ivec3 pos(0);
+                pos[axis] = d; pos[u] = i; pos[v] = j;
+                glm::vec3 worldPos = chunk.getWorldPos() + glm::vec3(pos);
+                if (positive) worldPos[axis] += 1.0f;
+
+                glm::vec3 du(0), dv(0);
+                du[u] = (float)w; dv[v] = (float)h;
+
+                float shade = 1.0f;
+                if (face == FACE_NEG_Y) shade = 0.5f;
+                else if (axis == 0) shade = 0.7f; // X faces
+                else if (axis == 2) shade = 0.85f; // Z faces
+
+                glm::vec3 finalColor = BLOCK_INFO[curr.blockType].color * shade;
+                auto& targetBuffer = curr.transparent ? transparentVerts : opaqueVerts;
+
+                // Calculate UVs with rotation and tiling
+                glm::vec2 uv00 = rotateUV(glm::vec2(0, 0), curr.uvRotation);
+                glm::vec2 uv10 = rotateUV(glm::vec2(w, 0), curr.uvRotation);
+                glm::vec2 uv11 = rotateUV(glm::vec2(w, h), curr.uvRotation);
+                glm::vec2 uv01 = rotateUV(glm::vec2(0, h), curr.uvRotation);
+
+                if (positive) {
+                    targetBuffer.push_back({worldPos, normal, finalColor, uv00, (float)curr.textureLayer, 1.0f});
+                    targetBuffer.push_back({worldPos + du, normal, finalColor, uv10, (float)curr.textureLayer, 1.0f});
+                    targetBuffer.push_back({worldPos + du + dv, normal, finalColor, uv11, (float)curr.textureLayer, 1.0f});
+                    targetBuffer.push_back({worldPos, normal, finalColor, uv00, (float)curr.textureLayer, 1.0f});
+                    targetBuffer.push_back({worldPos + du + dv, normal, finalColor, uv11, (float)curr.textureLayer, 1.0f});
+                    targetBuffer.push_back({worldPos + dv, normal, finalColor, uv01, (float)curr.textureLayer, 1.0f});
+                } else {
+                    targetBuffer.push_back({worldPos, normal, finalColor, uv00, (float)curr.textureLayer, 1.0f});
+                    targetBuffer.push_back({worldPos + du + dv, normal, finalColor, uv11, (float)curr.textureLayer, 1.0f});
+                    targetBuffer.push_back({worldPos + du, normal, finalColor, uv10, (float)curr.textureLayer, 1.0f});
+                    targetBuffer.push_back({worldPos, normal, finalColor, uv00, (float)curr.textureLayer, 1.0f});
+                    targetBuffer.push_back({worldPos + dv, normal, finalColor, uv01, (float)curr.textureLayer, 1.0f});
+                    targetBuffer.push_back({worldPos + du + dv, normal, finalColor, uv11, (float)curr.textureLayer, 1.0f});
+                }
+
+                // Clear mask for processed area
+                for (int m = 0; m < h; m++) {
+                    for (int n = 0; n < w; n++) {
+                        mask[i + n + (j + m) * CHUNK_SIZE].textureLayer = -1;
+                    }
+                }
+                i += w;
+            }
+        }
     }
+}
 
     static void meshMicroBlocks(Chunk& chunk, std::vector<ChunkVertex>& verts) {
         float microScale = 1.0f / MICRO_BLOCK_SIZE;
@@ -1670,7 +1668,7 @@ int main() {
 
     // Generate chunks
     ChunkManager chunkManager;
-    const int WORLD_SIZE = 4;
+    const int WORLD_SIZE = 16;
 
     std::cout << "Generating terrain..." << std::endl;
     for (int z = 0; z < WORLD_SIZE; z++) {
@@ -1682,8 +1680,11 @@ int main() {
     }
 
     std::cout << "Building meshes..." << std::endl;
+    int count = 0;
     for (auto& [hash, chunk] : chunkManager.chunks) {
         chunkManager.rebuildChunkMesh(chunk.get());
+        std::cout << count << "/" << WORLD_SIZE * WORLD_SIZE * WORLD_SIZE << std::endl;
+        count+=1;
     }
 
     std::cout << "Collecting model blocks..." << std::endl;
@@ -1781,24 +1782,42 @@ int main() {
         // Render transparent geometry last (with blending)
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glDepthMask(GL_FALSE);  // Don't write to depth buffer for transparent
+        glDepthMask(GL_FALSE);
 
         glUseProgram(chunkProgram);
 
+        // Collect chunks with transparent geometry
+        struct TransparentJob {
+            Chunk* chunk;
+            float distanceSq;
+        };
+        std::vector<TransparentJob> transparentJobs;
+
         for (auto& [hash, chunk] : chunkManager.chunks) {
-            if (chunk->isEmpty || !chunk->meshUploaded) continue;
-            if (chunk->transparentVertexCount == 0) continue;
+            if (chunk->isEmpty || !chunk->meshUploaded || chunk->transparentVertexCount == 0)
+                continue;
 
             glm::vec3 minPos, maxPos;
             chunk->getBoundingBox(minPos, maxPos);
 
-            if (!frustum.isBoxVisible(minPos, maxPos)) continue;
+            if (frustum.isBoxVisible(minPos, maxPos)) {
+                glm::vec3 chunkCenter = minPos + glm::vec3(CHUNK_SIZE / 2.0f);
+                float distSq = glm::distance2(g_manager.camera.pos, chunkCenter);
+                transparentJobs.push_back({chunk.get(), distSq});
+            }
+        }
 
-            visibleTransparentVerts += chunk->transparentVertexCount;
+        // Sort Back-to-Front (highest distance first)
+        std::sort(transparentJobs.begin(), transparentJobs.end(),
+            [](const TransparentJob& a, const TransparentJob& b) {
+                return a.distanceSq > b.distanceSq;
+            });
 
-            glBindVertexArray(chunk->transparentVAO);
-            glDrawArrays(GL_TRIANGLES, 0,
-                         static_cast<GLsizei>(chunk->transparentVertexCount));
+        // Draw sorted chunks
+        for (auto& job : transparentJobs) {
+            visibleTransparentVerts += job.chunk->transparentVertexCount;
+            glBindVertexArray(job.chunk->transparentVAO);
+            glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(job.chunk->transparentVertexCount));
         }
 
         glDepthMask(GL_TRUE);
