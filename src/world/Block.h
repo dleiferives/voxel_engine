@@ -32,6 +32,8 @@ enum BlockType : uint8_t {
     BLOCK_MUSHROOM,
     BLOCK_CRYSTAL,
     BLOCK_TORCH,
+    // Log block (for trees)
+    BLOCK_LOG,
     // Micro blocks
     BLOCK_MICRO_TERRAIN,
     BLOCK_MICRO_SCULPTURE,

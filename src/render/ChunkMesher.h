@@ -34,6 +34,7 @@ private:
         int textureLayer;
         uint8_t uvRotation;
         bool transparent;
+        uint8_t lightLevel;  // Quantized light level for greedy merge comparison
     };
 
     static void meshFace(Chunk& chunk,
@@ -63,7 +64,7 @@ private:
                     const BlockInfo& blockInfo = BLOCK_INFO[blockData.type];
 
                     if (blockInfo.category != CATEGORY_SOLID) {
-                        mask[i + j * CHUNK_SIZE] = {0, 0, -1, 0, false};
+                        mask[i + j * CHUNK_SIZE] = {0, 0, -1, 0, false, 0};
                         continue;
                     }
 
@@ -95,15 +96,20 @@ private:
                         uint8_t uvRot = (ROTATION_UV_ROT[blockData.rotation][face] +
                                          blockInfo.textureInfo->faces[originalFace].uvRotation) % 4;
 
+                        // Get light level for this face and quantize to reduce greedy mesh fragmentation
+                        float light = getSmoothLight(chunk, pos.x, pos.y, pos.z, face);
+                        uint8_t quantizedLight = static_cast<uint8_t>(light * 15.0f);
+
                         mask[i + j * CHUNK_SIZE] = {
                             blockData.type,
                             blockData.rotation,
                             (int)blockInfo.textureInfo->faces[originalFace].textureId,
                             uvRot,
-                            isTransparent
+                            isTransparent,
+                            quantizedLight
                         };
                     } else {
-                        mask[i + j * CHUNK_SIZE] = {0, 0, -1, 0, false};
+                        mask[i + j * CHUNK_SIZE] = {0, 0, -1, 0, false, 0};
                     }
                 }
             }
@@ -117,7 +123,7 @@ private:
                     while (i + w < CHUNK_SIZE) {
                         FaceData& next = mask[i + w + j * CHUNK_SIZE];
                         if (next.blockType != curr.blockType || next.textureLayer != curr.textureLayer ||
-                            next.uvRotation != curr.uvRotation) break;
+                            next.uvRotation != curr.uvRotation || next.lightLevel != curr.lightLevel) break;
                         w++;
                     }
 
@@ -127,7 +133,7 @@ private:
                         for (int k = 0; k < w; k++) {
                             FaceData& nextRow = mask[i + k + (j + h) * CHUNK_SIZE];
                             if (nextRow.blockType != curr.blockType || nextRow.textureLayer != curr.textureLayer ||
-                                nextRow.uvRotation != curr.uvRotation) {
+                                nextRow.uvRotation != curr.uvRotation || nextRow.lightLevel != curr.lightLevel) {
                                 done = true; break;
                             }
                         }
@@ -143,7 +149,8 @@ private:
                     glm::vec3 du(0), dv(0);
                     du[u] = (float)w; dv[v] = (float)h;
 
-                    float lightLevel = getSmoothLight(chunk, pos.x, pos.y, pos.z, face);
+                    // Use the stored light level from the mask (already computed per-block)
+                    float lightLevel = curr.lightLevel / 15.0f;
 
                     const BlockInfo& blockInfo = BLOCK_INFO[curr.blockType];
                     if (blockInfo.textureInfo && blockInfo.textureInfo->fullBright) {

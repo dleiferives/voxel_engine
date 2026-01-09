@@ -129,15 +129,20 @@ inline void calculateChunkLighting(Chunk& chunk) {
     chunk.needsLightRebuild = false;
 }
 
-// Get smooth light level for a vertex
+// Get light level for a face - samples the air block adjacent to the face
 inline float getSmoothLight(Chunk& chunk, int bx, int by, int bz, int face) {
     int nx = bx + (int)FACE_NORMALS[face].x;
     int ny = by + (int)FACE_NORMALS[face].y;
     int nz = bz + (int)FACE_NORMALS[face].z;
 
-    if (nx < 0 || nx >= CHUNK_SIZE || ny < 0 || nz < 0 || nz >= CHUNK_SIZE) {
+    // Handle out-of-chunk samples
+    if (nx < 0 || nx >= CHUNK_SIZE || ny < 0 || ny >= CHUNK_SIZE || nz < 0 || nz >= CHUNK_SIZE) {
+        // Above chunk = full sunlight
         if (ny >= CHUNK_SIZE) return 1.0f;
-        return 0.5f;
+        // Below chunk or outside horizontally = assume some ambient
+        if (ny < 0) return 0.3f;
+        // Side edges - use edge block's light or ambient
+        return 0.7f;
     }
 
     return chunk.getCombinedLight(nx, ny, nz);

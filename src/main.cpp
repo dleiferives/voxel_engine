@@ -2,15 +2,23 @@
 #include "core/Common.h"
 #include "core/Camera.h"
 
+// Entity headers
+#include "entity/Player.h"
+
 // World headers
 #include "world/Block.h"
 #include "world/Chunk.h"
 #include "world/Lighting.h"
+#include "world/TerrainGen.h"
 
 // Render headers
 #include "render/TextureAtlas.h"
 #include "render/ChunkMesher.h"
 #include "render/ModelRenderer.h"
+#include "render/BlockHighlight.h"
+
+// Physics headers
+#include "physics/Raycast.h"
 
 // ImGui
 #include <imgui/imgui.h>
@@ -44,6 +52,11 @@ MicroBlockPalette g_microPalette;
 BlockTextureInfo g_blockTextures[BLOCK_COUNT];
 TextureAtlas g_textureAtlas;
 
+// Global player and UI state
+Player* g_player = nullptr;
+bool g_uiMode = false;
+float g_deltaTime = 0.0f;
+
 void initBlockTextures() {
     g_textureAtlas.init(16);
 
@@ -59,6 +72,8 @@ void initBlockTextures() {
     uint16_t leavesTex = g_textureAtlas.addTexture("textures/leaves.png");
     uint16_t glassTex = g_textureAtlas.addTexture("textures/glass.png");
     uint16_t brickTex = g_textureAtlas.addTexture("textures/brick.png");
+    uint16_t logTop = g_textureAtlas.addTexture("textures/log_top.png");
+    uint16_t logSide = g_textureAtlas.addTexture("textures/log_side.png");
 
     // Fallback colors if textures don't exist
     uint16_t stoneColor = g_textureAtlas.addColor(glm::vec3(0.5f));
@@ -69,6 +84,7 @@ void initBlockTextures() {
     uint16_t leavesColor = g_textureAtlas.addColor(glm::vec3(0.1f, 0.5f, 0.1f));
     uint16_t glassColor = g_textureAtlas.addColor(glm::vec3(0.8f, 0.9f, 1.0f));
     uint16_t brickColor = g_textureAtlas.addColor(glm::vec3(0.7f, 0.3f, 0.2f));
+    uint16_t logColor = g_textureAtlas.addColor(glm::vec3(0.4f, 0.25f, 0.1f));
 
     // Stone - same texture all sides
     g_blockTextures[BLOCK_STONE] = {
@@ -102,6 +118,13 @@ void initBlockTextures() {
     g_blockTextures[BLOCK_WOOD] = {
         {{woodColor, 0}, {woodColor, 0}, {woodColor, 0},
          {woodColor, 0}, {woodColor, 0}, {woodColor, 0}},
+        false, false
+    };
+
+    // Log - different top/bottom vs sides
+    g_blockTextures[BLOCK_LOG] = {
+        {{logColor, 0}, {logColor, 0}, {logColor, 0},
+         {logColor, 0}, {logColor, 0}, {logColor, 0}},
         false, false
     };
 
@@ -169,6 +192,8 @@ BlockInfo BLOCK_INFO[] = {
     {CATEGORY_MODEL, glm::vec3(0.8f, 0.7f, 0.6f), 0.3f, 2, nullptr, 0, false},  // MUSHROOM
     {CATEGORY_MODEL, glm::vec3(0.6f, 0.8f, 1.0f), 0.5f, 3, nullptr, 7, false},  // CRYSTAL - emits some light
     {CATEGORY_MODEL, glm::vec3(1.0f, 0.8f, 0.3f), 0.3f, 4, nullptr, 14, false}, // TORCH - bright light
+    // LOG block
+    {CATEGORY_SOLID, glm::vec3(0.4f, 0.25f, 0.1f), 1.0f, 0, &g_blockTextures[BLOCK_LOG], 0, true}, // LOG
     // Micro blocks - block light
     {CATEGORY_MICRO, glm::vec3(0.7f, 0.5f, 0.3f), 1.0f, 0, nullptr, 0, true},   // MICRO_TERRAIN
     {CATEGORY_MICRO, glm::vec3(0.8f, 0.8f, 0.8f), 1.0f, 1, nullptr, 0, true},   // MICRO_SCULPTURE
@@ -179,6 +204,11 @@ public:
     std::unordered_map<int64_t, std::unique_ptr<Chunk>> chunks;
     std::vector<ChunkVertex> opaqueBuffer;
     std::vector<ChunkVertex> transparentBuffer;
+
+    // Streaming state
+    std::vector<glm::ivec3> chunksToGenerate;
+    std::vector<glm::ivec3> chunksToMesh;
+    glm::ivec3 lastPlayerChunk = glm::ivec3(INT_MAX);
 
     int64_t hashPos(glm::ivec3 pos) const {
         return (int64_t(pos.x) & 0xFFFFF) |
@@ -198,112 +228,98 @@ public:
         return ptr;
     }
 
-    void generateTerrain(glm::ivec3 chunkPos) {
+    void generateChunkTerrain(glm::ivec3 chunkPos) {
         Chunk* chunk = createChunk(chunkPos);
-        glm::vec3 worldBase = chunk->getWorldPos();
+        g_terrainGen.generateChunk(*chunk, chunkPos.x, chunkPos.y, chunkPos.z);
+        chunk->needsRebuild = true;
+        chunk->needsLightRebuild = true;
+        chunksToMesh.push_back(chunkPos);
+    }
 
-        for (int z = 0; z < CHUNK_SIZE; z++) {
-            for (int x = 0; x < CHUNK_SIZE; x++) {
-                float wx = worldBase.x + x;
-                float wz = worldBase.z + z;
+    // Update chunks around player
+    void updateAroundPlayer(const glm::ivec3& playerChunk, int renderDistance) {
+        // Check if player moved to a new chunk
+        if (playerChunk == lastPlayerChunk) return;
+        lastPlayerChunk = playerChunk;
 
-                float height = 16.0f +
-                    8.0f * sin(wx * 0.05f) * cos(wz * 0.05f) +
-                    4.0f * sin(wx * 0.1f + 1.0f) * sin(wz * 0.1f);
+        // Find chunks that need to be loaded
+        chunksToGenerate.clear();
 
-                for (int y = 0; y < CHUNK_SIZE; y++) {
-                    float wy = worldBase.y + y;
+        for (int dy = -renderDistance; dy <= renderDistance; dy++) {
+            for (int dz = -renderDistance; dz <= renderDistance; dz++) {
+                for (int dx = -renderDistance; dx <= renderDistance; dx++) {
+                    // Spherical-ish distance check
+                    float dist = sqrtf(dx*dx + dy*dy + dz*dz);
+                    if (dist > renderDistance) continue;
 
-                    if (wy < height - 4) {
-                        chunk->setBlock(x, y, z, BLOCK_STONE);
-                    } else if (wy < height - 1) {
-                        chunk->setBlock(x, y, z, BLOCK_DIRT);
-                    } else if (wy < height) {
-                        // Randomly rotate grass blocks
-                        uint8_t rot = static_cast<uint8_t>(
-                            (int(wx * 7 + wz * 13) % 4));
-                        chunk->setBlock(x, y, z, BLOCK_GLASS, rot);
-
-                        int iy = y + 1;
-                        if (iy < CHUNK_SIZE &&
-                            chunk->getBlock(x, iy, z).type == BLOCK_AIR) {
-                            float r = fmodf(wx * 12.9898f + wz * 78.233f, 1.0f);
-                            r = fmodf(sinf(r * 43758.5453f) * 0.5f + 0.5f, 1.0f);
-
-                            if (r < 0.02f) {
-                                chunk->setBlock(x, iy, z, BLOCK_FLOWER_RED);
-                            } else if (r < 0.04f) {
-                                chunk->setBlock(x, iy, z, BLOCK_FLOWER_YELLOW);
-                            } else if (r < 0.15f) {
-                                chunk->setBlock(x, iy, z, BLOCK_TALL_GRASS);
-                            } else if (r < 0.17f) {
-                                chunk->setBlock(x, iy, z, BLOCK_MUSHROOM);
-                            } else if (r < 0.18f) {
-                                chunk->setBlock(x, iy, z, BLOCK_CRYSTAL);
-                            } else if (r < 0.20f) {
-                                // Add a micro block
-                                chunk->setBlock(x, iy, z, BLOCK_MICRO_TERRAIN);
-                                generateMicroTerrain(chunk, x, iy, z);
-                            } else if (r < 0.21f) {
-                                chunk->setBlock(x, iy, z, BLOCK_MICRO_SCULPTURE);
-                                generateMicroSculpture(chunk, x, iy, z);
-                            }
-                        }
-                    }
-
-                    // Add some glass windows at certain heights
-                    if (wy > height && wy < height + 3) {
-                        float gr = fmodf(wx * 5.5f + wz * 3.3f + wy * 2.1f, 1.0f);
-                        gr = fmodf(sinf(gr * 12345.6f) * 0.5f + 0.5f, 1.0f);
-                        if (gr < 0.01f) {
-                            chunk->setBlock(x, y, z, BLOCK_GLASS);
-                        }
+                    glm::ivec3 chunkPos = playerChunk + glm::ivec3(dx, dy, dz);
+                    if (!getChunk(chunkPos)) {
+                        chunksToGenerate.push_back(chunkPos);
                     }
                 }
             }
         }
+
+        // Sort by distance to player (closest first)
+        std::sort(chunksToGenerate.begin(), chunksToGenerate.end(),
+            [&playerChunk](const glm::ivec3& a, const glm::ivec3& b) {
+                float distA = glm::length(glm::vec3(a - playerChunk));
+                float distB = glm::length(glm::vec3(b - playerChunk));
+                return distA < distB;
+            });
     }
 
-    void generateMicroTerrain(Chunk* chunk, int bx, int by, int bz) {
-        MicroBlockData* data = chunk->getMicroData(bx, by, bz);
-        if (!data) return;
+    // Unload distant chunks
+    void unloadDistantChunks(const glm::ivec3& playerChunk, int maxDistance) {
+        std::vector<int64_t> toRemove;
 
-        // Generate a small terrain-like pattern
-        for (int z = 0; z < MICRO_BLOCK_SIZE; z++) {
-            for (int x = 0; x < MICRO_BLOCK_SIZE; x++) {
-                float h = 4.0f + 3.0f * sinf(x * 0.5f) * cosf(z * 0.5f);
-                for (int y = 0; y < MICRO_BLOCK_SIZE; y++) {
-                    if (y < h) {
-                        if (y < h - 2) {
-                            data->set(x, y, z, 3);  // Gray (stone)
-                        } else if (y < h - 1) {
-                            data->set(x, y, z, 15); // Brown (dirt)
-                        } else {
-                            data->set(x, y, z, 7);  // Green (grass)
-                        }
-                    }
+        for (auto& [hash, chunk] : chunks) {
+            glm::ivec3 diff = chunk->chunkPos - playerChunk;
+            float dist = glm::length(glm::vec3(diff));
+            if (dist > maxDistance + 2) {
+                // Cleanup OpenGL resources
+                if (chunk->VAO) {
+                    glDeleteVertexArrays(1, &chunk->VAO);
+                    glDeleteBuffers(1, &chunk->VBO);
                 }
+                if (chunk->transparentVAO) {
+                    glDeleteVertexArrays(1, &chunk->transparentVAO);
+                    glDeleteBuffers(1, &chunk->transparentVBO);
+                }
+                toRemove.push_back(hash);
+            }
+        }
+
+        for (int64_t hash : toRemove) {
+            chunks.erase(hash);
+        }
+    }
+
+    // Process chunk generation queue
+    void processGenerationQueue(int maxPerFrame = 1) {
+        int processed = 0;
+        while (!chunksToGenerate.empty() && processed < maxPerFrame) {
+            glm::ivec3 pos = chunksToGenerate.back();
+            chunksToGenerate.pop_back();
+
+            if (!getChunk(pos)) {
+                generateChunkTerrain(pos);
+                processed++;
             }
         }
     }
 
-    void generateMicroSculpture(Chunk* chunk, int bx, int by, int bz) {
-        MicroBlockData* data = chunk->getMicroData(bx, by, bz);
-        if (!data) return;
+    // Process mesh building queue
+    void processMeshQueue(int maxPerFrame = 2) {
+        int processed = 0;
+        while (!chunksToMesh.empty() && processed < maxPerFrame) {
+            glm::ivec3 pos = chunksToMesh.back();
+            chunksToMesh.pop_back();
 
-        // Generate a simple sculpture (sphere-ish)
-        glm::vec3 center(8, 8, 8);
-        for (int z = 0; z < MICRO_BLOCK_SIZE; z++) {
-            for (int y = 0; y < MICRO_BLOCK_SIZE; y++) {
-                for (int x = 0; x < MICRO_BLOCK_SIZE; x++) {
-                    float dist = glm::length(glm::vec3(x, y, z) - center);
-                    if (dist < 6.0f) {
-                        // Color based on distance from center
-                        uint8_t colorIdx = static_cast<uint8_t>(
-                            6 + (int(dist) % 8));
-                        data->set(x, y, z, colorIdx);
-                    }
-                }
+            Chunk* chunk = getChunk(pos);
+            if (chunk && chunk->needsRebuild) {
+                rebuildChunkMesh(chunk);
+                processed++;
             }
         }
     }
@@ -415,6 +431,72 @@ public:
     }
 };
 
+// Block interaction globals
+ChunkManager* g_chunkManager = nullptr;
+int g_selectedBlockType = BLOCK_STONE;
+bool g_leftMousePressed = false;
+bool g_rightMousePressed = false;
+bool g_needsModelUpdate = false;
+
+// Available blocks for hotbar
+const uint8_t HOTBAR_BLOCKS[] = {
+    BLOCK_STONE, BLOCK_DIRT, BLOCK_GRASS, BLOCK_SAND,
+    BLOCK_WOOD, BLOCK_LOG, BLOCK_LEAVES, BLOCK_GLASS, BLOCK_BRICK,
+    BLOCK_GLOWSTONE, BLOCK_LAVA
+};
+const int HOTBAR_SIZE = sizeof(HOTBAR_BLOCKS) / sizeof(HOTBAR_BLOCKS[0]);
+int g_hotbarIndex = 0;
+
+void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
+    if (g_player) {
+        g_player->processMouse((float)xpos, (float)ypos, g_uiMode);
+    }
+}
+
+void mouse_button_callback(GLFWwindow* window, int button, int action, int mods) {
+    if (g_uiMode) return;
+
+    if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS) {
+        g_leftMousePressed = true;
+    }
+    if (button == GLFW_MOUSE_BUTTON_RIGHT && action == GLFW_PRESS) {
+        g_rightMousePressed = true;
+    }
+}
+
+void scroll_callback(GLFWwindow* window, double xoffset, double yoffset) {
+    if (g_uiMode) return;
+
+    g_hotbarIndex -= (int)yoffset;
+    if (g_hotbarIndex < 0) g_hotbarIndex = HOTBAR_SIZE - 1;
+    if (g_hotbarIndex >= HOTBAR_SIZE) g_hotbarIndex = 0;
+    g_selectedBlockType = HOTBAR_BLOCKS[g_hotbarIndex];
+}
+
+void processInput(GLFWwindow* window) {
+    if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
+        glfwSetWindowShouldClose(window, true);
+
+    static bool tab_pressed = false;
+    if (glfwGetKey(window, GLFW_KEY_TAB) == GLFW_PRESS) {
+        if (!tab_pressed) {
+            g_uiMode = !g_uiMode;
+            glfwSetInputMode(window, GLFW_CURSOR,
+                             g_uiMode ? GLFW_CURSOR_NORMAL : GLFW_CURSOR_DISABLED);
+            if (!g_uiMode && g_player) {
+                g_player->resetMouse();
+            }
+            tab_pressed = true;
+        }
+    } else {
+        tab_pressed = false;
+    }
+
+    if (g_player) {
+        g_player->processKeyboard(window, g_deltaTime, g_uiMode);
+    }
+}
+
 GLuint compileShader(GLenum type, const char* source) {
     GLuint shader = glCreateShader(type);
     glShaderSource(shader, 1, &source, nullptr);
@@ -441,7 +523,7 @@ int main() {
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
     GLFWwindow* window = glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT,
-        "Hybrid Voxels - Textured + Micro Blocks", nullptr, nullptr);
+        "Voxel World - Infinite Streaming", nullptr, nullptr);
     if (!window) {
         std::cerr << "Failed to create GLFW window\n";
         glfwTerminate();
@@ -452,6 +534,8 @@ int main() {
     glfwSwapInterval(0);
     glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
     glfwSetCursorPosCallback(window, mouse_callback);
+    glfwSetMouseButtonCallback(window, mouse_button_callback);
+    glfwSetScrollCallback(window, scroll_callback);
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
     if (!gladLoadGL((GLADloadfunc)glfwGetProcAddress)) {
@@ -482,31 +566,22 @@ int main() {
     ModelRenderer modelRenderer;
     modelRenderer.init(cullingCompSource, modelVertSource, modelFragSource);
 
-    // Generate chunks
+    // Initialize block highlight renderer
+    BlockHighlight blockHighlight;
+    blockHighlight.init();
+
+    // Create player
+    Player player(glm::vec3(0.0f, 64.0f, 0.0f));
+    player.yaw = -135.0f;
+    player.pitch = -20.0f;
+    player.updateVectors();
+    g_player = &player;
+
+    // Create chunk manager
     ChunkManager chunkManager;
-    const int WORLD_SIZE = 8;
+    g_chunkManager = &chunkManager;
 
-    std::cout << "Generating terrain..." << std::endl;
-    for (int z = 0; z < WORLD_SIZE; z++) {
-        for (int y = 0; y < WORLD_SIZE; y++) {
-            for (int x = 0; x < WORLD_SIZE; x++) {
-                chunkManager.generateTerrain(glm::ivec3(x, y, z));
-            }
-        }
-    }
-
-    std::cout << "Building meshes..." << std::endl;
-    int count = 0;
-    for (auto& [hash, chunk] : chunkManager.chunks) {
-        chunkManager.rebuildChunkMesh(chunk.get());
-        std::cout << count << "/" << WORLD_SIZE * WORLD_SIZE * WORLD_SIZE << std::endl;
-        count+=1;
-    }
-
-    std::cout << "Collecting model blocks..." << std::endl;
-    chunkManager.collectAllModelBlocks(modelRenderer);
-    std::cout << "Total model instances: " << modelRenderer.allInstances.size()
-              << std::endl;
+    std::cout << "Starting infinite world generation..." << std::endl;
 
     // Setup ImGui
     IMGUI_CHECKVERSION();
@@ -520,25 +595,127 @@ int main() {
     uint32_t totalChunks = 0, visibleChunks = 0;
     uint32_t totalOpaqueVerts = 0, visibleOpaqueVerts = 0;
     uint32_t totalTransparentVerts = 0, visibleTransparentVerts = 0;
+    float lastFrame = 0.0f;
 
     while (!glfwWindowShouldClose(window)) {
         float currentFrame = static_cast<float>(glfwGetTime());
-        g_manager.delta_time = currentFrame - g_manager.last_frame;
-        g_manager.last_frame = currentFrame;
+        g_deltaTime = currentFrame - lastFrame;
+        lastFrame = currentFrame;
 
         processInput(window);
 
-        glm::mat4 projection = glm::perspective(
-            glm::radians(60.0f),
-            (float)SCR_WIDTH / (float)SCR_HEIGHT,
-            0.1f,
-            g_manager.camera.render_distance
-        );
-        glm::mat4 view = glm::lookAt(
-            g_manager.camera.pos,
-            g_manager.camera.pos + g_manager.camera.front,
-            g_manager.camera.up
-        );
+        // Update chunk streaming
+        glm::ivec3 playerChunk = player.getChunkPosition();
+        chunkManager.updateAroundPlayer(playerChunk, player.chunkRenderDistance);
+        chunkManager.processGenerationQueue(200);  // Generate up to 2 chunks per frame
+        chunkManager.processMeshQueue(3);        // Mesh up to 4 chunks per frame
+        chunkManager.unloadDistantChunks(playerChunk, player.chunkRenderDistance);
+
+        // Raycast for block targeting
+        auto getWorldBlock = [&](int x, int y, int z) -> BlockData {
+            glm::ivec3 chunkPos = glm::ivec3(
+                (x >= 0 ? x : x - CHUNK_SIZE + 1) / CHUNK_SIZE,
+                (y >= 0 ? y : y - CHUNK_SIZE + 1) / CHUNK_SIZE,
+                (z >= 0 ? z : z - CHUNK_SIZE + 1) / CHUNK_SIZE
+            );
+            Chunk* chunk = chunkManager.getChunk(chunkPos);
+            if (!chunk) return {BLOCK_AIR, ROT_Y_UP_Z_FWD, 0};
+
+            int lx = ((x % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+            int ly = ((y % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+            int lz = ((z % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+            return chunk->getBlock(lx, ly, lz);
+        };
+
+        RaycastHit hit = raycast(player.position, player.front, 8.0f, getWorldBlock);
+
+        // Helper lambda to rebuild chunk and neighbors if on boundary
+        auto rebuildChunkAndNeighbors = [&](Chunk* chunk, int lx, int ly, int lz) {
+            chunk->needsLightRebuild = true;
+            chunkManager.rebuildChunkMesh(chunk);
+
+            // Check if block is on chunk boundary and rebuild neighbor chunks
+            glm::ivec3 cpos = chunk->chunkPos;
+            if (lx == 0) {
+                Chunk* neighbor = chunkManager.getChunk(cpos + glm::ivec3(-1, 0, 0));
+                if (neighbor) { neighbor->needsRebuild = true; neighbor->needsLightRebuild = true; chunkManager.rebuildChunkMesh(neighbor); }
+            }
+            if (lx == CHUNK_SIZE - 1) {
+                Chunk* neighbor = chunkManager.getChunk(cpos + glm::ivec3(1, 0, 0));
+                if (neighbor) { neighbor->needsRebuild = true; neighbor->needsLightRebuild = true; chunkManager.rebuildChunkMesh(neighbor); }
+            }
+            if (ly == 0) {
+                Chunk* neighbor = chunkManager.getChunk(cpos + glm::ivec3(0, -1, 0));
+                if (neighbor) { neighbor->needsRebuild = true; neighbor->needsLightRebuild = true; chunkManager.rebuildChunkMesh(neighbor); }
+            }
+            if (ly == CHUNK_SIZE - 1) {
+                Chunk* neighbor = chunkManager.getChunk(cpos + glm::ivec3(0, 1, 0));
+                if (neighbor) { neighbor->needsRebuild = true; neighbor->needsLightRebuild = true; chunkManager.rebuildChunkMesh(neighbor); }
+            }
+            if (lz == 0) {
+                Chunk* neighbor = chunkManager.getChunk(cpos + glm::ivec3(0, 0, -1));
+                if (neighbor) { neighbor->needsRebuild = true; neighbor->needsLightRebuild = true; chunkManager.rebuildChunkMesh(neighbor); }
+            }
+            if (lz == CHUNK_SIZE - 1) {
+                Chunk* neighbor = chunkManager.getChunk(cpos + glm::ivec3(0, 0, 1));
+                if (neighbor) { neighbor->needsRebuild = true; neighbor->needsLightRebuild = true; chunkManager.rebuildChunkMesh(neighbor); }
+            }
+        };
+
+        // Handle block breaking (left click)
+        if (g_leftMousePressed && hit.hit) {
+            g_leftMousePressed = false;
+
+            glm::ivec3 chunkPos = glm::ivec3(
+                (hit.blockPos.x >= 0 ? hit.blockPos.x : hit.blockPos.x - CHUNK_SIZE + 1) / CHUNK_SIZE,
+                (hit.blockPos.y >= 0 ? hit.blockPos.y : hit.blockPos.y - CHUNK_SIZE + 1) / CHUNK_SIZE,
+                (hit.blockPos.z >= 0 ? hit.blockPos.z : hit.blockPos.z - CHUNK_SIZE + 1) / CHUNK_SIZE
+            );
+            Chunk* chunk = chunkManager.getChunk(chunkPos);
+            if (chunk) {
+                int lx = ((hit.blockPos.x % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+                int ly = ((hit.blockPos.y % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+                int lz = ((hit.blockPos.z % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+
+                chunk->setBlock(lx, ly, lz, BLOCK_AIR);
+                rebuildChunkAndNeighbors(chunk, lx, ly, lz);
+                g_needsModelUpdate = true;
+            }
+        }
+        g_leftMousePressed = false;
+
+        // Handle block placing (right click)
+        if (g_rightMousePressed && hit.hit) {
+            g_rightMousePressed = false;
+
+            glm::ivec3 placePos = hit.placePos;
+            glm::ivec3 chunkPos = glm::ivec3(
+                (placePos.x >= 0 ? placePos.x : placePos.x - CHUNK_SIZE + 1) / CHUNK_SIZE,
+                (placePos.y >= 0 ? placePos.y : placePos.y - CHUNK_SIZE + 1) / CHUNK_SIZE,
+                (placePos.z >= 0 ? placePos.z : placePos.z - CHUNK_SIZE + 1) / CHUNK_SIZE
+            );
+            Chunk* chunk = chunkManager.getChunk(chunkPos);
+            if (chunk) {
+                int lx = ((placePos.x % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+                int ly = ((placePos.y % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+                int lz = ((placePos.z % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+
+                chunk->setBlock(lx, ly, lz, g_selectedBlockType);
+                rebuildChunkAndNeighbors(chunk, lx, ly, lz);
+                g_needsModelUpdate = true;
+            }
+        }
+        g_rightMousePressed = false;
+
+        // Update model instances if blocks changed
+        if (g_needsModelUpdate) {
+            chunkManager.collectAllModelBlocks(modelRenderer);
+            g_needsModelUpdate = false;
+        }
+
+        float aspectRatio = (float)SCR_WIDTH / (float)SCR_HEIGHT;
+        glm::mat4 projection = player.getProjectionMatrix(aspectRatio);
+        glm::mat4 view = player.getViewMatrix();
         glm::mat4 vp = projection * view;
 
         frustum.extract(vp);
@@ -556,7 +733,7 @@ int main() {
         glUniformMatrix4fv(glGetUniformLocation(chunkProgram, "projection"), 1,
                            GL_FALSE, glm::value_ptr(projection));
         glUniform3fv(glGetUniformLocation(chunkProgram, "viewPos"), 1,
-                     glm::value_ptr(g_manager.camera.pos));
+                     glm::value_ptr(player.position));
         glUniform1i(glGetUniformLocation(chunkProgram, "textureArray"), 0);
 
         totalChunks = 0;
@@ -589,10 +766,16 @@ int main() {
             }
         }
 
+        // Render block selection highlight
+        if (hit.hit && !g_uiMode) {
+            glDisable(GL_DEPTH_TEST);
+            blockHighlight.render(vp, hit.blockPos, glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
+            glEnable(GL_DEPTH_TEST);
+        }
+
         // Render GPU-culled model blocks
         glDisable(GL_CULL_FACE);
-        modelRenderer.cullAndRender(frustum.planes, view, projection,
-                                    g_manager.camera.pos);
+        modelRenderer.cullAndRender(frustum.planes, view, projection, player.position);
         glEnable(GL_CULL_FACE);
 
         // Render transparent geometry last (with blending)
@@ -618,7 +801,7 @@ int main() {
 
             if (frustum.isBoxVisible(minPos, maxPos)) {
                 glm::vec3 chunkCenter = minPos + glm::vec3(CHUNK_SIZE / 2.0f);
-                float distSq = glm::distance2(g_manager.camera.pos, chunkCenter);
+                float distSq = glm::distance2(player.position, chunkCenter);
                 transparentJobs.push_back({chunk.get(), distSq});
             }
         }
@@ -644,14 +827,25 @@ int main() {
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
 
-        if (g_manager.ui_mode) {
+        if (g_uiMode) {
             ImGui::GetIO().ConfigFlags &= ~ImGuiConfigFlags_NoMouse;
         } else {
             ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouse;
         }
 
+        // Draw crosshair in game mode
+        if (!g_uiMode) {
+            ImDrawList* drawList = ImGui::GetBackgroundDrawList();
+            float cx = SCR_WIDTH / 2.0f;
+            float cy = SCR_HEIGHT / 2.0f;
+            float size = 10.0f;
+            ImU32 color = IM_COL32(255, 255, 255, 200);
+            drawList->AddLine(ImVec2(cx - size, cy), ImVec2(cx + size, cy), color, 2.0f);
+            drawList->AddLine(ImVec2(cx, cy - size), ImVec2(cx, cy + size), color, 2.0f);
+        }
+
         ImGui::Begin("Debug Menu");
-        if (g_manager.ui_mode) {
+        if (g_uiMode) {
             ImGui::TextColored(ImVec4(0, 1, 0, 1), "MENU MODE (TAB to close)");
         } else {
             ImGui::Text("GAME MODE (TAB for menu)");
@@ -659,6 +853,22 @@ int main() {
         ImGui::Separator();
         ImGui::Text("FPS: %.1f", io.Framerate);
         ImGui::Text("Frame Time: %.3f ms", 1000.0f / io.Framerate);
+
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.5f, 1.0f, 1.0f, 1.0f), "Player:");
+        ImGui::Text("  Position: %.1f, %.1f, %.1f",
+                    player.position.x, player.position.y, player.position.z);
+        ImGui::Text("  Chunk: %d, %d, %d",
+                    playerChunk.x, playerChunk.y, playerChunk.z);
+        ImGui::SliderFloat("Move Speed", &player.moveSpeed, 10.0f, 200.0f);
+        ImGui::SliderInt("Chunk Render Distance", &player.chunkRenderDistance, 2, 16);
+        ImGui::SliderFloat("View Distance", &player.viewDistance, 100.0f, 2000.0f);
+
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "World Streaming:");
+        ImGui::Text("  Loaded Chunks: %zu", chunkManager.chunks.size());
+        ImGui::Text("  Generation Queue: %zu", chunkManager.chunksToGenerate.size());
+        ImGui::Text("  Mesh Queue: %zu", chunkManager.chunksToMesh.size());
 
         ImGui::Separator();
         ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f),
@@ -682,17 +892,27 @@ int main() {
                     : 0.0f);
 
         ImGui::Separator();
-        ImGui::TextColored(ImVec4(0.8f, 0.5f, 1.0f, 1.0f), "Texture Atlas:");
-        ImGui::Text("  Textures: %d", g_textureAtlas.layerCount);
-        ImGui::Text("  Tile Size: %d", g_textureAtlas.tileSize);
-
-        ImGui::Separator();
-        ImGui::Text("Camera: %.1f, %.1f, %.1f",
-                    g_manager.camera.pos.x, g_manager.camera.pos.y,
-                    g_manager.camera.pos.z);
-        ImGui::SliderFloat("Speed", &g_manager.camera.speed, 1.0f, 200.0f);
-        ImGui::SliderFloat("Render Dist", &g_manager.camera.render_distance,
-                           50.0f, 1000.0f);
+        ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.5f, 1.0f), "Block Interaction:");
+        if (hit.hit) {
+            ImGui::Text("  Target: %d, %d, %d", hit.blockPos.x, hit.blockPos.y, hit.blockPos.z);
+        } else {
+            ImGui::Text("  Target: None");
+        }
+        ImGui::Text("  Selected: %s",
+            g_selectedBlockType == BLOCK_STONE ? "Stone" :
+            g_selectedBlockType == BLOCK_DIRT ? "Dirt" :
+            g_selectedBlockType == BLOCK_GRASS ? "Grass" :
+            g_selectedBlockType == BLOCK_SAND ? "Sand" :
+            g_selectedBlockType == BLOCK_WOOD ? "Wood" :
+            g_selectedBlockType == BLOCK_LOG ? "Log" :
+            g_selectedBlockType == BLOCK_LEAVES ? "Leaves" :
+            g_selectedBlockType == BLOCK_GLASS ? "Glass" :
+            g_selectedBlockType == BLOCK_BRICK ? "Brick" :
+            g_selectedBlockType == BLOCK_GLOWSTONE ? "Glowstone" :
+            g_selectedBlockType == BLOCK_LAVA ? "Lava" : "Unknown");
+        ImGui::Text("  Scroll to change block");
+        ImGui::Text("  Left click to break");
+        ImGui::Text("  Right click to place");
         ImGui::End();
 
         ImGui::Render();
@@ -709,6 +929,7 @@ int main() {
 
     glDeleteProgram(chunkProgram);
     modelRenderer.cleanup();
+    blockHighlight.cleanup();
     g_textureAtlas.cleanup();
 
     glfwDestroyWindow(window);
