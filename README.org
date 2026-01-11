@@ -1,3 +1,19 @@
+** Installing
+To install the project you have to pull down the code along with its submodules:
+#+begin_src
+git clone https://github.com/dleiferives/voxel_engine
+git submodule init
+git submodule update
+#+end_src
+
+** Building
+#+begin_src
+mkdir build
+cd build
+cmake ..
+cmake --build .
+#+end_src
+
 ** Speedup
 
 So right now I am rendering 1M cubes at around 16fps.
