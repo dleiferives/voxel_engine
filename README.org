@@ -1,3 +1,5 @@
+# Voxel Engine
+
 ** Installing
 To install the project you have to pull down the code along with its submodules:
 #+begin_src
@@ -7,6 +9,10 @@ git submodule update
 #+end_src
 
 ** Building
+You will need clang 17 or 18 (prefereably 18).
+You will need to install Vulkan so that it can be built on your computer.
+For linux (only tested so far) the instructions for installation can be found [here](https://docs.vulkan.org/tutorial/latest/02_Development_environment.html#_linux_2)
+
 #+begin_src
 mkdir build
 cd build
@@ -14,41 +20,9 @@ cmake ..
 cmake --build .
 #+end_src
 
-** Speedup
-
-So right now I am rendering 1M cubes at around 16fps.
-This is not good enough.
-*** Face culling
-This had little to no impact on performance...
-I'm going to remove it for now but if performance is an issue later then we can think about it again.
-*** Use an index buffer
-Just reduces the number of indicies that need to be send to the gpu.
-https://www.youtube.com/watch?v=o6oRc1QOifI&disable_polymer=true
-This was no faster either
-*** CPU frustum culling
-Just going to try to reduce the number of fellows on the gpu that the gpu is being asked to render. The shit that we can see
-
-Again this did not speed her up whatsoever...
-
-** Chunk Structuring
-We need to setup the chunks so that they are optimized within singular blocks, This will allow for better utilization of the hardware. However this will cause there to be more issues with the "distant horizons" style of LOD.
-
-In this regard the Minecraft methodology is highly effective as it allows us to deal only with the two dimensions. However, this does have a large amount of extra memory. In some regard we could use bounded octrees for relaying where the information is stored inside of the chunking system so it is  more efficent. However this really does throw a spanner in the rendering optimization. There should be some amount of bounding the height that can be built to.
-
-Perhaps we could acheive this by using in game rules so that it is immersive. Such as gravity or something of that regard. Where taller things are more unstable and therefore we have to have a stronger base to build from.
-
-In this same regard we can handle depths. Where we can have molten or various stages of liquidity inside of the world generation. Where you have to cool the earth to make stable or habitable structures.
-
-This would of course lead to further issues. However the idea of constraining the build space by using game rules would be effective.
-
 
 ** Setup
 This project requires c++23.  We need to install the external dependecnies to build this.
-*** Glad
-I am using glad to do this: https://gen.glad.sh/ I am using the options of c/c++ opengl core 4.6
-I am inluding all the extensions. And enabling debug but nothing else...
-I then moved the thing that was created into the external / glad folder
-
 *** GLM
 There is of course the fetch content route for installing glm on cmake. However, I want to keep the project structure consistent so I'm going to put it into an external.
 
@@ -57,6 +31,3 @@ This was pretty simple just copied a folder over
 *** GLFW
 Fond this stackoverflow post which seems to be everything that I've been needing for a long while lol.
 https://stackoverflow.com/questions/17768008/how-to-build-install-glfw-3-and-use-it-in-a-linux-project
-
-
-g
